@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { redirectUriAllowed, type Config } from '../config.js';
 import { hashToken, newToken } from '../crypto.js';
 import type { Grant, Store } from '../store.js';
-import { renderLoginPage } from './login-page.js';
+import { renderLoginPage, signInPageHeaders } from './login-page.js';
 
 export const PENDING_TTL_SECONDS = 15 * 60;
 export const CODE_TTL_SECONDS = 60;
@@ -86,11 +86,14 @@ export class ImmichOAuthProvider implements OAuthServerProvider {
       resource: params.resource?.href,
       expiresAt: nowSeconds() + PENDING_TTL_SECONDS,
     });
+    const nonce = newToken(16);
     res
       .status(200)
+      .set(signInPageHeaders(params.redirectUri, nonce))
       .type('html')
       .send(
         renderLoginPage({
+          nonce,
           action: this.loginPath,
           requestId: id,
           clientName: client.client_name,

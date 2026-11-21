@@ -1,7 +1,6 @@
 import {
   createApiKey,
   deleteApiKey,
-  getApiKeys,
   isHttpError,
   login,
   logout,
@@ -64,11 +63,17 @@ export interface SignIn {
   user: LoginResponseDto;
   apiKeyId: string;
   apiKeySecret: string;
+  /**
+   * Finishes in the background, after the browser has been sent on: deletes the given API keys (the
+   * ones earlier sign-ins left, or this sign-in's own key when it could not be completed) and logs the
+   * password session out. Never throws.
+   */
+  finish: (deleteKeyIds: string[]) => Promise<void>;
 }
 
 /**
- * Signs in with the user's password, creates the API key this server will act with, deletes the keys
- * earlier sign-ins of the same client left behind, and logs the password session out again.
+ * Signs in with the user's password and creates the API key this server will act with. Only the two
+ * calls the browser has to wait for happen here; cleanup is left to `finish`.
  * The password is used for this one request and never stored.
  */
 export async function signInAndCreateKey(options: {
@@ -76,8 +81,6 @@ export async function signInAndCreateKey(options: {
   email: string;
   password: string;
   keyName: string;
-  /** API keys of earlier sign-ins by this user, to delete now; looked up once Immich says who signed in. */
-  replaceKeyIdsFor: (userId: string) => string[];
   clientIp?: string;
   fetch?: typeof fetch;
 }): Promise<SignIn> {
@@ -97,19 +100,24 @@ export async function signInAndCreateKey(options: {
     throw error;
   }
   const session = sessionOpts(options.immichUrl, user.accessToken, options.fetch);
-  try {
-    const existing = new Set((await getApiKeys(session)).map((k) => k.id));
-    for (const id of options.replaceKeyIdsFor(user.userId)) {
-      if (existing.has(id)) await deleteApiKey({ id }, session);
+  const finish = async (deleteKeyIds: string[]) => {
+    for (const id of new Set(deleteKeyIds)) {
+      // A key the user already deleted in Immich answers 400/404; that is the wanted state.
+      await deleteApiKey({ id }, session).catch(() => undefined);
     }
-    const created = await createApiKey(
+    await logout(session).catch(() => undefined);
+  };
+  let created;
+  try {
+    created = await createApiKey(
       { apiKeyCreateDto: { name: options.keyName, permissions: permissionsFor(user.isAdmin) } },
       session,
     );
-    return { user, apiKeyId: created.apiKey?.id ?? created.id, apiKeySecret: created.secret };
-  } finally {
-    await logout(session).catch(() => undefined);
+  } catch (error) {
+    await finish([]);
+    throw error;
   }
+  return { user, apiKeyId: created.apiKey?.id ?? created.id, apiKeySecret: created.secret, finish };
 }
 
 /** True when Immich says the key is no longer valid (revoked in Account settings, or the user removed). */

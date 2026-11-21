@@ -4,7 +4,31 @@ const escape = (value: string): string =>
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c,
   );
 
+/**
+ * Headers for the sign-in page. `form-action` must allow the app's redirect URI as well as this
+ * server: browsers apply it to the redirect that follows the form post, and blocking it leaves the
+ * page hanging after a successful sign-in.
+ */
+export function signInPageHeaders(redirectUri: string, nonce: string): Record<string, string> {
+  const target = new URL(redirectUri);
+  return {
+    'Content-Security-Policy': [
+      "default-src 'none'",
+      "style-src 'unsafe-inline'",
+      `script-src 'nonce-${nonce}'`,
+      `form-action 'self' ${target.origin}`,
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+    ].join('; '),
+    'X-Frame-Options': 'DENY',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+  };
+}
+
 export interface LoginPageOptions {
+  /** Script nonce matching signInPageHeaders. */
+  nonce: string;
   action: string;
   requestId: string;
   clientName?: string;
@@ -42,6 +66,9 @@ export function renderLoginPage(o: LoginPageOptions): string {
   button { margin-top: 1.5rem; width: 100%; padding: .7rem; font: inherit; font-weight: 600; border: 0;
            border-radius: .5rem; background: var(--accent); color: Canvas; cursor: pointer; }
   .error { padding: .6rem .8rem; border-radius: .5rem; background: color-mix(in srgb, red 15%, transparent); }
+  button:disabled { opacity: .6; cursor: progress; }
+  #working { display: none; }
+  form.busy + #working { display: block; }
 </style>
 </head>
 <body>
@@ -59,6 +86,18 @@ export function renderLoginPage(o: LoginPageOptions): string {
     <input id="password" name="password" type="password" autocomplete="current-password" required>
     <button type="submit">Sign in and allow</button>
   </form>
+  <p id="working" role="status">Signing in… this can take up to a minute. Keep this page open.</p>
+  <script nonce="${escape(o.nonce)}">
+    document.querySelector('form').addEventListener('submit', (event) => {
+      const form = event.currentTarget;
+      if (form.classList.contains('busy')) { event.preventDefault(); return; }
+      form.classList.add('busy');
+      const button = form.querySelector('button');
+      button.textContent = 'Signing in…';
+      // Disabled after this tick, so the click still submits the form.
+      setTimeout(() => { button.disabled = true; }, 0);
+    });
+  </script>
   <p class="muted">Your password goes to Immich once and is not stored. Signing in creates an API key named
      “${keyName}” in your Immich account; delete it under Account Settings → API Keys to end this access.</p>
 </main>

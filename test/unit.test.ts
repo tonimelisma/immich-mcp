@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { DEFAULT_REDIRECT_URIS, loadConfig, redirectUriAllowed } from '../src/config.js';
 import { hashToken, pkceMatches, SecretBox } from '../src/crypto.js';
 import { ADMIN_PERMISSIONS, permissionsFor, USER_PERMISSIONS } from '../src/immich.js';
+import { signInPageHeaders } from '../src/oauth/login-page.js';
 import { ImmichOAuthProvider, REFRESH_REUSE_GRACE_SECONDS } from '../src/oauth/provider.js';
 import { Store } from '../src/store.js';
 
@@ -48,6 +49,19 @@ describe('crypto', () => {
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     expect(pkceMatches(verifier, challenge)).toBe(true);
     expect(pkceMatches('w'.repeat(50), challenge)).toBe(false);
+  });
+});
+
+describe('sign-in page headers', () => {
+  it('let the form post here and its redirect go to the app', () => {
+    const csp = signInPageHeaders('https://claude.ai/api/mcp/auth_callback', 'n0nce')[
+      'Content-Security-Policy'
+    ];
+    expect(csp).toContain("form-action 'self' https://claude.ai;");
+    expect(csp).toContain("script-src 'nonce-n0nce'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    const local = signInPageHeaders('http://localhost:33418/callback', 'x')['Content-Security-Policy'];
+    expect(local).toContain("form-action 'self' http://localhost:33418;");
   });
 });
 

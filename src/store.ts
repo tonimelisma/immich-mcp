@@ -226,12 +226,10 @@ export class Store {
     return row ? this.grantFrom(row) : undefined;
   }
 
-  grantsFor(userId: string, clientId: string): Grant[] {
-    return (
-      this.db
-        .prepare('SELECT * FROM grants WHERE user_id = ? AND client_id = ?')
-        .all(userId, clientId) as Row[]
-    ).map((row) => this.grantFrom(row));
+  grantsForUser(userId: string): Grant[] {
+    return (this.db.prepare('SELECT * FROM grants WHERE user_id = ?').all(userId) as Row[]).map((row) =>
+      this.grantFrom(row),
+    );
   }
 
   /** Removes the grant and, through the foreign keys, every code and token issued under it. */

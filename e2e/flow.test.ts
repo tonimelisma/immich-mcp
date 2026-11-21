@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { createHash, randomBytes } from 'node:crypto';
+import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { createServer } from 'node:net';
@@ -46,6 +47,10 @@ async function api(
   });
   const text = await res.text();
   return { status: res.status, data: (text ? JSON.parse(text) : undefined) as unknown };
+}
+
+async function claudeKeys(token: string): Promise<Json[]> {
+  return ((await api('/api-keys', { token })).data as Json[]).filter((k) => k.name === 'Claude (immich-mcp)');
 }
 
 async function login(user: { email: string; password: string }): Promise<string> {
@@ -181,7 +186,7 @@ async function register(redirect = CALLBACK) {
   });
 }
 
-async function startAuthorization(clientId: string) {
+function authorizationUrl(clientId: string) {
   const verifier = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   const url = new URL(`${base}/mcp/oauth/authorize`);
@@ -195,6 +200,11 @@ async function startAuthorization(clientId: string) {
     scope: 'immich',
     resource: `${base}/mcp`,
   }).toString();
+  return { url: url.href, verifier };
+}
+
+async function startAuthorization(clientId: string) {
+  const { url, verifier } = authorizationUrl(clientId);
   const page = await fetch(url);
   const html = await page.text();
   const requestId = /name="request_id" value="([^"]+)"/.exec(html)?.[1];
@@ -292,23 +302,64 @@ describe('OAuth', () => {
     expect((await tokenRequest({ ...params, code_verifier: verifier })).status).toBe(400);
   });
 
-  it('creates one scoped API key per sign-in and replaces it on the next', async () => {
-    const tokens = await signIn(MEMBER);
-    await signIn(MEMBER, tokens.clientId);
-    const keys = ((await api('/api-keys', { token: memberToken })).data as Json[]).filter(
-      (k) => k.name === 'Claude (immich-mcp)',
+  it('keeps one scoped API key per user and app, replaced on each sign-in', async () => {
+    // claude.ai registers a new client on every connect, so a fresh client with the same callback
+    // counts as the same app.
+    await signIn(MEMBER);
+    await signIn(MEMBER);
+    await signIn(MEMBER);
+    const keys = await until(
+      'old keys to be deleted',
+      async () => {
+        const all = await claudeKeys(memberToken);
+        return all.length === 1 ? all : undefined;
+      },
+      20,
     );
-    const fromThisClient = keys.length;
-    expect(fromThisClient).toBeGreaterThanOrEqual(1);
-    // Earlier tests signed in with other clients; this client's two sign-ins leave one key between them.
-    const before = keys.length;
-    await signIn(MEMBER, tokens.clientId);
-    const after = ((await api('/api-keys', { token: memberToken })).data as Json[]).filter(
-      (k) => k.name === 'Claude (immich-mcp)',
+    expect([...(keys[0]?.permissions as string[])].sort()).toEqual([...USER_PERMISSIONS].sort());
+  });
+
+  it('a second submit of the same form joins the first instead of failing', async () => {
+    const id = ((await (await register()).json()) as Json).client_id as string;
+    const { requestId } = await startAuthorization(id);
+    const [first, second] = await Promise.all([
+      submitLogin(requestId, MEMBER.email, MEMBER.password),
+      submitLogin(requestId, MEMBER.email, MEMBER.password),
+    ]);
+    expect(first.status).toBe(302);
+    expect(second.status).toBe(302);
+    expect(second.headers.get('location')).toBe(first.headers.get('location'));
+    // ...and one more after it finished, as a reload would.
+    const third = await submitLogin(requestId, MEMBER.email, MEMBER.password);
+    expect(third.status).toBe(302);
+    expect(third.headers.get('location')).toBe(first.headers.get('location'));
+    await until('one key', async () => ((await claudeKeys(memberToken)).length === 1 ? true : undefined), 20);
+  });
+
+  it('signs in from a real browser, which enforces the page security policy', async () => {
+    const browser = await chromium.launch(
+      process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {},
     );
-    expect(after.length).toBe(before);
-    for (const key of after) {
-      expect([...(key.permissions as string[])].sort()).toEqual([...USER_PERMISSIONS].sort());
+    try {
+      const page = await browser.newPage();
+      const reachedCallback = page.waitForRequest((r) => r.url().startsWith(CALLBACK), { timeout: 60_000 });
+      await page.route(`${CALLBACK}**`, (route) => route.fulfill({ status: 200, body: 'callback reached' }));
+      const id = ((await (await register()).json()) as Json).client_id as string;
+      const { url } = authorizationUrl(id);
+      const blocked: string[] = [];
+      page.on('console', (m) => {
+        if (/Content Security Policy|Refused/i.test(m.text())) blocked.push(m.text());
+      });
+      await page.goto(url);
+      await page.fill('#email', MEMBER.email);
+      await page.fill('#password', MEMBER.password);
+      await page.click('button[type=submit]');
+      const callback = new URL((await reachedCallback).url());
+      expect(callback.searchParams.get('code')).toBeTruthy();
+      expect(callback.searchParams.get('state')).toBe('state-1');
+      expect(blocked).toEqual([]);
+    } finally {
+      await browser.close();
     }
   });
 

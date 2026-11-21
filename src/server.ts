@@ -13,7 +13,7 @@ import type { ToolContext } from './tools/context.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 const INSTRUCTIONS = `Tools for one person's Immich photo library, acting as that Immich user.
 Find photos with search_photos (natural-language query plus filters), then look at them with view_photos

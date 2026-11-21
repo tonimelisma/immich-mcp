@@ -5,13 +5,17 @@ import { metadataHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/
 import { clientRegistrationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/register.js';
 import { revocationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/revoke.js';
 import { tokenHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/token.js';
-import type { OAuthMetadata, OAuthProtectedResourceMetadata } from '@modelcontextprotocol/sdk/shared/auth.js';
+import type {
+  OAuthClientInformationFull,
+  OAuthMetadata,
+  OAuthProtectedResourceMetadata,
+} from '@modelcontextprotocol/sdk/shared/auth.js';
 import { randomUUID } from 'node:crypto';
 import { basePath, type Config } from '../config.js';
-import type { SecretBox } from '../crypto.js';
+import { newToken, type SecretBox } from '../crypto.js';
 import { describeError, LoginFailed, signInAndCreateKey } from '../immich.js';
-import type { Store } from '../store.js';
-import { renderLoginPage, renderMessagePage } from './login-page.js';
+import type { PendingAuthorization, Store } from '../store.js';
+import { renderLoginPage, renderMessagePage, signInPageHeaders } from './login-page.js';
 import { ImmichOAuthProvider, SCOPE } from './provider.js';
 
 export interface OAuthRoutes {
@@ -78,14 +82,7 @@ export function oauthRoutes(
   }
   router.use(`/.well-known/oauth-protected-resource${base}`, metadataHandler(resourceMetadata));
 
-  router.use(`${base}/oauth/authorize`, (_req, res, next) => {
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-    );
-    next();
-  });
+  // The sign-in page's headers depend on the redirect URI, so ImmichOAuthProvider.authorize sets them.
   router.use(`${base}/oauth/authorize`, authorizationHandler({ provider }));
   router.use(`${base}/oauth/token`, tokenHandler({ provider }));
   // Client secrets never expire: an expiring secret would silently end every sign-in after it.
@@ -94,6 +91,81 @@ export function oauthRoutes(
     clientRegistrationHandler({ clientsStore: provider.clientsStore, clientSecretExpirySeconds: 0 }),
   );
   router.use(`${base}/oauth/revoke`, revocationHandler({ provider }));
+
+  /** Clients count as the same app when they register the same redirect URIs (claude.ai registers anew). */
+  const sameApp = (a: string[], b: string[]) =>
+    JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+  type Outcome = { redirect: string } | { status: number; error: string };
+  // A second submit of the same form (impatient click, reload) joins the first instead of racing it.
+  const inflight = new Map<string, Promise<Outcome>>();
+  const completed = new Map<string, { redirect: string; expiresAt: number }>();
+
+  const completeSignIn = async (
+    requestId: string,
+    pending: PendingAuthorization,
+    client: OAuthClientInformationFull,
+    email: string,
+    password: string,
+    clientIp: string | undefined,
+  ): Promise<Outcome> => {
+    const started = Date.now();
+    let signIn;
+    try {
+      signIn = await signInAndCreateKey({
+        immichUrl: config.immichUrl,
+        email,
+        password,
+        keyName: config.apiKeyName,
+        clientIp,
+        fetch: options.fetch,
+      });
+    } catch (error) {
+      if (error instanceof LoginFailed) {
+        log(`sign-in failed for ${email} from ${clientIp}`);
+        return { status: 401, error: error.message };
+      }
+      log(`sign-in error for ${email}: ${describeError(error)}`);
+      return { status: 502, error: `Immich could not complete the sign-in (${describeError(error)}).` };
+    }
+    const user = signIn.user;
+    // Signing in again from the same app replaces the earlier sign-in and deletes its API key.
+    const earlier = store
+      .grantsForUser(user.userId)
+      .filter((g) => sameApp(store.getClient(g.clientId)?.redirect_uris ?? [], client.redirect_uris));
+    const grantId = randomUUID();
+    try {
+      for (const old of earlier) store.deleteGrant(old.id);
+      store.saveGrant({
+        id: grantId,
+        clientId: client.client_id,
+        userId: user.userId,
+        email: user.userEmail,
+        name: user.name,
+        isAdmin: user.isAdmin,
+        apiKeyId: signIn.apiKeyId,
+        apiKeySealed: box.seal(signIn.apiKeySecret),
+        scopes: pending.scopes,
+        resource: pending.resource,
+        createdAt: Math.floor(started / 1000),
+      });
+      const redirect = provider.issueCode(grantId, requestId).href;
+      void signIn.finish(earlier.map((g) => g.apiKeyId));
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      log(
+        `sign-in: ${user.userEmail} (${user.isAdmin ? 'admin' : 'user'}) via ${client.client_name ?? client.client_id} in ${seconds} s`,
+      );
+      return { redirect };
+    } catch (error) {
+      store.deleteGrant(grantId);
+      void signIn.finish([signIn.apiKeyId]);
+      log(`sign-in error for ${email}: ${describeError(error)}`);
+      return {
+        status: 400,
+        error: 'This sign-in request has expired. Start connecting again from your app.',
+      };
+    }
+  };
 
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -106,19 +178,22 @@ export function oauthRoutes(
     loginLimiter,
     express.urlencoded({ extended: false, limit: '8kb' }),
     async (req: Request, res: Response) => {
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('X-Frame-Options', 'DENY');
-      res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-      );
       const requestId = formField(req.body, 'request_id');
       const email = formField(req.body, 'email').trim();
       const password = formField(req.body, 'password');
-      const now = Math.floor(Date.now() / 1000);
-      const pending = requestId ? store.getPending(requestId, now) : undefined;
+      const nowMs = Date.now();
+      for (const [id, done] of completed) if (done.expiresAt <= nowMs) completed.delete(id);
+
+      const done = completed.get(requestId);
+      if (done) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.redirect(302, done.redirect);
+        return;
+      }
+      const pending = requestId ? store.getPending(requestId, Math.floor(nowMs / 1000)) : undefined;
       const client = pending && store.getClient(pending.clientId);
       if (!pending || !client) {
+        res.setHeader('Cache-Control', 'no-store');
         res
           .status(400)
           .type('html')
@@ -130,12 +205,15 @@ export function oauthRoutes(
           );
         return;
       }
+      const nonce = newToken(16);
+      res.set(signInPageHeaders(pending.redirectUri, nonce));
       const again = (status: number, error: string) =>
         res
           .status(status)
           .type('html')
           .send(
             renderLoginPage({
+              nonce,
               action: loginPath,
               requestId,
               clientName: client.client_name,
@@ -150,45 +228,19 @@ export function oauthRoutes(
         again(400, 'Enter your email and password.');
         return;
       }
-      try {
-        // Signing in again from the same app replaces the earlier sign-in and deletes its API key.
-        const signIn = await signInAndCreateKey({
-          immichUrl: config.immichUrl,
-          email,
-          password,
-          keyName: config.apiKeyName,
-          clientIp: req.ip,
-          fetch: options.fetch,
-          replaceKeyIdsFor: (userId) => store.grantsFor(userId, client.client_id).map((g) => g.apiKeyId),
-        });
-        for (const old of store.grantsFor(signIn.user.userId, client.client_id)) store.deleteGrant(old.id);
-        const grantId = randomUUID();
-        store.saveGrant({
-          id: grantId,
-          clientId: client.client_id,
-          userId: signIn.user.userId,
-          email: signIn.user.userEmail,
-          name: signIn.user.name,
-          isAdmin: signIn.user.isAdmin,
-          apiKeyId: signIn.apiKeyId,
-          apiKeySealed: box.seal(signIn.apiKeySecret),
-          scopes: pending.scopes,
-          resource: pending.resource,
-          createdAt: now,
-        });
-        const redirect = provider.issueCode(grantId, requestId);
-        log(
-          `sign-in: ${signIn.user.userEmail} (${signIn.user.isAdmin ? 'admin' : 'user'}) via ${client.client_name ?? client.client_id}`,
+      let attempt = inflight.get(requestId);
+      if (!attempt) {
+        attempt = completeSignIn(requestId, pending, client, email, password, req.ip).finally(() =>
+          inflight.delete(requestId),
         );
-        res.redirect(302, redirect.href);
-      } catch (error) {
-        if (error instanceof LoginFailed) {
-          log(`sign-in failed for ${email} from ${req.ip}`);
-          again(401, error.message);
-          return;
-        }
-        log(`sign-in error for ${email}: ${describeError(error)}`);
-        again(502, `Immich could not complete the sign-in (${describeError(error)}).`);
+        inflight.set(requestId, attempt);
+      }
+      const outcome = await attempt;
+      if ('redirect' in outcome) {
+        completed.set(requestId, { redirect: outcome.redirect, expiresAt: pending.expiresAt * 1000 });
+        res.redirect(302, outcome.redirect);
+      } else {
+        again(outcome.status, outcome.error);
       }
     },
   );
