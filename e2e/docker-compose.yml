@@ -1,0 +1,51 @@
+# A throwaway Immich for the end-to-end tests. Nothing here touches a real library.
+# docker compose -f e2e/docker-compose.yml up -d --wait   (add --profile ml for smart search)
+name: immich-mcp-e2e
+
+services:
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3.4.2}
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+      IMMICH_MACHINE_LEARNING_URL: http://immich-machine-learning:3003
+    ports:
+      - '127.0.0.1:${E2E_IMMICH_PORT:-2299}:2283'
+    tmpfs:
+      - /data
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+
+  immich-machine-learning:
+    profiles: [ml]
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3.4.2}
+    volumes:
+      - model-cache:/cache
+
+  redis:
+    image: docker.io/valkey/valkey:9
+    healthcheck:
+      test: redis-cli ping || exit 1
+      interval: 2s
+
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U postgres -d immich
+      interval: 2s
+
+volumes:
+  model-cache:
