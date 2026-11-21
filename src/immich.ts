@@ -1,6 +1,7 @@
 import {
   createApiKey,
   deleteApiKey,
+  getApiKeys,
   isHttpError,
   login,
   logout,
@@ -59,16 +60,23 @@ function sessionOpts(baseUrl: string, accessToken: string, fetchImpl?: typeof fe
 
 export class LoginFailed extends Error {}
 
+/** Keys this young are never swept, so two simultaneous sign-ins cannot delete each other's new key. */
+export const KEY_GRACE_MS = 2 * 60 * 1000;
+
 export interface SignIn {
   user: LoginResponseDto;
   apiKeyId: string;
   apiKeySecret: string;
   /**
-   * Finishes in the background, after the browser has been sent on: deletes the given API keys (the
-   * ones earlier sign-ins left, or this sign-in's own key when it could not be completed) and logs the
-   * password session out. Never throws.
+   * Finishes in the background, after the browser has been sent on: deletes the keys with this
+   * server's name that `keep` does not list (left by earlier, expired or failed sign-ins), then logs
+   * the password session out. `keep` is read after Immich lists the keys, and keys younger than
+   * two minutes are spared, so a concurrent sign-in of the same user keeps its new key; `discard`
+   * names keys to delete regardless (those of the sign-ins this one replaced, or its own when it
+   * could not be completed).
+   * Returns the ids of the keys it deleted. Never throws.
    */
-  finish: (deleteKeyIds: string[]) => Promise<void>;
+  finish: (options: { keep: () => string[]; discard: string[] }) => Promise<string[]>;
 }
 
 /**
@@ -81,6 +89,8 @@ export async function signInAndCreateKey(options: {
   email: string;
   password: string;
   keyName: string;
+  /** Overrides KEY_GRACE_MS. */
+  keyGraceMs?: number;
   clientIp?: string;
   fetch?: typeof fetch;
 }): Promise<SignIn> {
@@ -100,12 +110,30 @@ export async function signInAndCreateKey(options: {
     throw error;
   }
   const session = sessionOpts(options.immichUrl, user.accessToken, options.fetch);
-  const finish = async (deleteKeyIds: string[]) => {
-    for (const id of new Set(deleteKeyIds)) {
-      // A key the user already deleted in Immich answers 400/404; that is the wanted state.
-      await deleteApiKey({ id }, session).catch(() => undefined);
+  const finish: SignIn['finish'] = async ({ keep: keepIds, discard: discardIds }) => {
+    const deleted: string[] = [];
+    try {
+      const keys = await getApiKeys(session);
+      const keep = new Set(keepIds());
+      const discard = new Set(discardIds);
+      const youngerThan = Date.now() - (options.keyGraceMs ?? KEY_GRACE_MS);
+      const stale = keys.filter(
+        (k) =>
+          discard.has(k.id) ||
+          (k.name === options.keyName && !keep.has(k.id) && Date.parse(k.createdAt) < youngerThan),
+      );
+      for (const key of stale) {
+        // A key deleted meanwhile answers 400/404; that is the wanted state.
+        await deleteApiKey({ id: key.id }, session).then(
+          () => deleted.push(key.id),
+          () => undefined,
+        );
+      }
+    } catch {
+      // Listing failed: leave the keys; the next sign-in tries again.
     }
     await logout(session).catch(() => undefined);
+    return deleted;
   };
   let created;
   try {
@@ -114,7 +142,7 @@ export async function signInAndCreateKey(options: {
       session,
     );
   } catch (error) {
-    await finish([]);
+    await logout(session).catch(() => undefined);
     throw error;
   }
   return { user, apiKeyId: created.apiKey?.id ?? created.id, apiKeySecret: created.secret, finish };

@@ -117,6 +117,7 @@ export function oauthRoutes(
         email,
         password,
         keyName: config.apiKeyName,
+        keyGraceMs: config.keyGraceSeconds * 1000,
         clientIp,
         fetch: options.fetch,
       });
@@ -150,7 +151,12 @@ export function oauthRoutes(
         createdAt: Math.floor(started / 1000),
       });
       const redirect = provider.issueCode(grantId, requestId).href;
-      void signIn.finish(earlier.map((g) => g.apiKeyId));
+      // Keep the keys of this user's other live sign-ins (other apps); every other key with this
+      // server's name is left over from replaced, expired or failed sign-ins.
+      const live = () => store.grantsForUser(user.userId).map((g) => g.apiKeyId);
+      void signIn.finish({ keep: live, discard: earlier.map((g) => g.apiKeyId) }).then((deleted) => {
+        if (deleted.length) log(`sign-in: deleted ${deleted.length} unused API key(s) of ${user.userEmail}`);
+      });
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
       log(
         `sign-in: ${user.userEmail} (${user.isAdmin ? 'admin' : 'user'}) via ${client.client_name ?? client.client_id} in ${seconds} s`,
@@ -158,7 +164,10 @@ export function oauthRoutes(
       return { redirect };
     } catch (error) {
       store.deleteGrant(grantId);
-      void signIn.finish([signIn.apiKeyId]);
+      void signIn.finish({
+        keep: () => store.grantsForUser(user.userId).map((g) => g.apiKeyId),
+        discard: [signIn.apiKeyId],
+      });
       log(`sign-in error for ${email}: ${describeError(error)}`);
       return {
         status: 400,

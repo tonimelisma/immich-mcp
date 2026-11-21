@@ -1,6 +1,6 @@
 {
   "name": "immich-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for Immich with sign-in by Immich email and password (OAuth 2.1), per-user scoped API keys and no delete",
   "main": "dist/index.js",
   "scripts": {

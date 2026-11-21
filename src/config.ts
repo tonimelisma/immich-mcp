@@ -17,6 +17,8 @@ export interface Config {
   /** Express `trust proxy` setting, so rate limits see the real client address. */
   trustProxy: string | number | boolean;
   apiKeyName: string;
+  /** Unused keys younger than this are not swept (see KEY_GRACE_MS). */
+  keyGraceSeconds: number;
 }
 
 export const DEFAULT_REDIRECT_URIS = [
@@ -73,6 +75,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     refreshTokenTtlSeconds: seconds(env, 'REFRESH_TOKEN_TTL', 90 * 24 * 3600),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     apiKeyName: env.API_KEY_NAME || 'Claude (immich-mcp)',
+    keyGraceSeconds: env.KEY_GRACE_SECONDS === '0' ? 0 : seconds(env, 'KEY_GRACE_SECONDS', 120),
   };
 }
 

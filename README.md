@@ -72,7 +72,8 @@ server settings, user management.
    your account with only the permissions the tools need, then logs that password session out.
 4. The client gets an access token (1 hour) and a rotating refresh token (90 days). A refresh token used twice
    ends the sign-in. Only hashes of tokens are stored; the Immich key is encrypted with AES-256-GCM.
-5. Signing in again from the same app replaces the old key. If Immich rejects the key (you deleted it), the
+5. Signing in again from the same app replaces the old key, and any other unused "Claude (immich-mcp)" key
+   left by an expired or failed sign-in is deleted. If Immich rejects the key (you deleted it), the
    connection ends and the app asks you to sign in again.
 
 Redirect URIs are limited to Claude's callbacks and loopback addresses by default (`ALLOWED_REDIRECT_URIS`).

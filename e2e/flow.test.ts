@@ -154,6 +154,7 @@ beforeAll(async () => {
     PUBLIC_URL: `${base}/mcp`,
     IMMICH_URL: IMMICH,
     IMMICH_PUBLIC_URL: 'https://photos.example.com',
+    KEY_GRACE_SECONDS: '0',
   });
   store = new Store(':memory:');
   box = new SecretBox(randomBytes(32));
@@ -317,6 +318,29 @@ describe('OAuth', () => {
       20,
     );
     expect([...(keys[0]?.permissions as string[])].sort()).toEqual([...USER_PERMISSIONS].sort());
+  });
+
+  it('deletes keys left by expired sign-ins, and nothing else', async () => {
+    const make = async (name: string) =>
+      (
+        (await api('/api-keys', { token: memberToken, body: { name, permissions: ['asset.read'] } }))
+          .data as Json
+      ).apiKey as Json;
+    const stray = await make('Claude (immich-mcp)');
+    const other = await make('Some other app');
+    await signIn(MEMBER);
+    await until(
+      'the stray key to be deleted',
+      async () => {
+        const ids = ((await api('/api-keys', { token: memberToken })).data as Json[]).map((k) => k.id);
+        return ids.includes(stray.id) ? undefined : ids;
+      },
+      20,
+    );
+    const names = ((await api('/api-keys', { token: memberToken })).data as Json[]).map((k) => k.name);
+    expect(names).toContain('Some other app');
+    expect(names.filter((n) => n === 'Claude (immich-mcp)')).toHaveLength(1);
+    await api(`/api-keys/${other.id as string}`, { token: memberToken, method: 'DELETE' });
   });
 
   it('a second submit of the same form joins the first instead of failing', async () => {
