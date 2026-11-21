@@ -1,0 +1,30 @@
+name: E2E with machine learning
+
+# Smart search and OCR need Immich's machine-learning container and its models (about 2 GB),
+# so they run here on demand and weekly rather than on every push.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-ml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: docker compose -f e2e/docker-compose.yml --profile ml up -d --wait
+      - run: npm run test:e2e
+        env:
+          E2E_ML: '1'
+      - if: failure()
+        run: docker compose -f e2e/docker-compose.yml --profile ml logs immich-server immich-machine-learning | tail -300
