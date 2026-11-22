@@ -161,6 +161,8 @@ export function summarizeAsset(ctx: ToolContext, asset: AssetResponseDto) {
     type: kindOf(asset),
     file: asset.originalFileName,
     place: placeOf(asset),
+    duration:
+      asset.type === AssetTypeEnum.Video && asset.duration ? formatDuration(asset.duration) : undefined,
     people: asset.people?.filter((p) => p.name).map((p) => p.name),
     favorite: asset.isFavorite || undefined,
     rating: asset.exifInfo?.rating ?? undefined,

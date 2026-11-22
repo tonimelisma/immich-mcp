@@ -98,7 +98,12 @@ let box: SecretBox;
 let base: string;
 let memberToken: string;
 let adminToken: string;
-const ids: Record<'beach' | 'sign' | 'forest', string> = { beach: '', sign: '', forest: '' };
+const ids: Record<'beach' | 'sign' | 'forest' | 'night', string> = {
+  beach: '',
+  sign: '',
+  forest: '',
+  night: '',
+};
 let faceId: string;
 const people = { alice: `Alice ${RUN}`, bob: `Bob ${RUN}`, carol: `Carol ${RUN}` };
 
@@ -115,9 +120,14 @@ beforeAll(async () => {
   ids.beach = await upload(memberToken, 'beach.jpg', '2024-07-14T15:30:00.000Z');
   ids.sign = await upload(memberToken, 'sign.jpg', '2023-12-24T10:00:00.000Z');
   ids.forest = await upload(memberToken, 'forest.jpg', '2022-05-01T16:15:00.000Z');
+  // 2025-03-01 01:00 at UTC+10, which is still 2025-02-28 in UTC.
+  ids.night = await upload(memberToken, 'night.jpg', '2025-02-28T15:00:00.000Z');
   await until('metadata extraction', async () => {
-    const res = await api(`/assets/${ids.forest}`, { token: memberToken });
-    return ((res.data as Json).exifInfo as Json | undefined)?.dateTimeOriginal ? true : undefined;
+    for (const id of Object.values(ids)) {
+      const res = await api(`/assets/${id}`, { token: memberToken });
+      if (!((res.data as Json).exifInfo as Json | undefined)?.dateTimeOriginal) return undefined;
+    }
+    return true;
   });
 
   const person = async (name: string) =>
@@ -434,6 +444,16 @@ describe('tools as a regular user', () => {
       await call('search_photos', { taken_after: '2023-12-01', taken_before: '2023-12-31' }),
     );
     expect(byDate.photos.map((p) => p.id)).toEqual([ids.sign]);
+    expect(byDate).not.toHaveProperty('count');
+    // Days are the local days where the photo was taken, not UTC days.
+    const localDay = parsed<{ photos: Json[] }>(
+      await call('search_photos', { taken_after: '2025-03-01', taken_before: '2025-03-01' }),
+    );
+    expect(localDay.photos.map((p) => [p.id, p.taken])).toEqual([[ids.night, '2025-03-01 01:00']]);
+    const utcDay = parsed<{ photos: Json[] }>(
+      await call('search_photos', { taken_after: '2025-02-28', taken_before: '2025-02-28' }),
+    );
+    expect(utcDay.photos).toEqual([]);
     const byPerson = parsed<{ photos: Json[] }>(await call('search_photos', { people: [people.alice] }));
     expect(byPerson.photos.map((p) => p.id)).toEqual([ids.beach]);
     expect(byPerson.photos[0]?.url).toBe(`https://photos.example.com/photos/${ids.beach}`);
@@ -633,11 +653,17 @@ describe('admin', () => {
     expect((overview.totals as Json).uploaded_files).toMatch(/GiB$/);
     const users = parsed<Json[]>(await client.callTool({ name: 'admin_list_users', arguments: {} }));
     expect(users.map((u) => u.email)).toContain(MEMBER.email);
-    const queues = parsed<{ busy: Json[]; idle: string[] }>(
+    const queues = parsed<{ busy: Json[]; failed: Record<string, number>; idle: string[] }>(
       await client.callTool({ name: 'admin_job_queues', arguments: {} }),
     );
-    expect([...queues.busy.map((q) => q.queue), ...queues.idle]).toContain('thumbnailGeneration');
-    for (const q of queues.busy) expect(q).not.toHaveProperty('completed');
+    expect([...queues.busy.map((q) => q.queue), ...Object.keys(queues.failed), ...queues.idle]).toContain(
+      'thumbnailGeneration',
+    );
+    for (const q of queues.busy) {
+      expect(q).not.toHaveProperty('completed');
+      // A queue with nothing but failed jobs is not busy.
+      expect(q.active || q.waiting || q.delayed || q.paused).toBeTruthy();
+    }
     for (const action of ['pause', 'resume', 'start']) {
       const res = await client.callTool({
         name: 'admin_queue_control',

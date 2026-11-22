@@ -96,12 +96,14 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
       title: 'Job queues (admin)',
       description:
         'Immich background job queues (thumbnails, face recognition, smart search, …): for each busy queue the jobs ' +
-        'waiting, active, delayed and failed, and whether it is paused; queues with nothing to report are listed as idle.',
+        'waiting, active, delayed and failed, and whether it is paused; `failed` counts the failed jobs of queues with ' +
+        'no other work, and the rest are listed as idle.',
       inputSchema: {},
       annotations: READ_ONLY,
     },
     async () => {
       const busy = [];
+      const failedOnly: Record<string, number> = {};
       const idle: string[] = [];
       for (const q of await getQueues(ctx.opts)) {
         // `completed` is always 0 (Immich does not keep finished jobs) and `paused` repeats is_paused.
@@ -112,11 +114,12 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
           delayed: delayed || undefined,
           failed: failed || undefined,
         });
-        if (Object.keys(counts).length || q.isPaused)
+        if (active || waiting || delayed || q.isPaused)
           busy.push({ queue: q.name, paused: q.isPaused || undefined, ...counts });
+        else if (failed) failedOnly[q.name] = failed;
         else idle.push(q.name);
       }
-      return json({ busy, idle });
+      return json({ busy, failed: failedOnly, idle });
     },
   );
 

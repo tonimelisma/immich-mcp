@@ -110,8 +110,12 @@ export const searchInput = {
     .string()
     .optional()
     .describe('Place names as Immich stores them; search_suggestions lists them.'),
-  taken_after: date.optional().describe('Earliest date taken, YYYY-MM-DD or ISO date-time.'),
-  taken_before: date.optional().describe('Latest date taken, YYYY-MM-DD or ISO date-time.'),
+  taken_after: date
+    .optional()
+    .describe('Earliest date taken, YYYY-MM-DD (local to the photo, inclusive) or ISO date-time.'),
+  taken_before: date
+    .optional()
+    .describe('Latest date taken, YYYY-MM-DD (local to the photo, inclusive) or ISO date-time.'),
   type: z.enum(['photo', 'video']).optional(),
   favorite: z.boolean().optional(),
   rating: z.number().int().min(-1).max(5).optional().describe('Exact star rating, -1 = rejected.'),
@@ -131,8 +135,25 @@ export const searchInput = {
 
 type SearchArgs = { [K in keyof typeof searchInput]?: z.infer<(typeof searchInput)[K]> };
 
-const endOfDay = (value: string) => (value.length === 10 ? `${value}T23:59:59.999Z` : value);
-const startOfDay = (value: string) => (value.length === 10 ? `${value}T00:00:00.000Z` : value);
+/** Time zones run from UTC-12 to UTC+14, so a local day lies within these hours either side of the UTC day. */
+const ZONE_SLACK_MS = 14 * 3600 * 1000;
+const isDay = (value: string) => value.length === 10;
+const shift = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
+
+/**
+ * Immich filters on the UTC time, but dates are shown local to where the photo was taken. For a plain day
+ * (YYYY-MM-DD), ask Immich for a window wide enough for every time zone and keep the photos whose local date
+ * is in range. A date-time is a moment, so it is passed on as it is.
+ */
+export function dateRange(after?: string, before?: string) {
+  const takenAfter = after && (isDay(after) ? shift(`${after}T00:00:00.000Z`, -ZONE_SLACK_MS) : after);
+  const takenBefore = before && (isDay(before) ? shift(`${before}T23:59:59.999Z`, ZONE_SLACK_MS) : before);
+  const keep = (asset: Pick<AssetResponseDto, 'localDateTime'>) => {
+    const day = asset.localDateTime.slice(0, 10);
+    return !(after && isDay(after) && day < after) && !(before && isDay(before) && day > before);
+  };
+  return { takenAfter, takenBefore, keep };
+}
 
 /** Accepts tag ids, full names (Parent/Child) or, when it is unambiguous, the last part of the name. */
 export async function resolveTags(ctx: ToolContext, refs: string[]): Promise<TagResponseDto[]> {
@@ -154,6 +175,7 @@ export async function resolveTags(ctx: ToolContext, refs: string[]): Promise<Tag
 export async function runSearch(ctx: ToolContext, args: SearchArgs): Promise<CallToolResult> {
   const size = args.limit ?? 25;
   const page = args.page ?? 1;
+  const dates = dateRange(args.taken_after, args.taken_before);
   const common = compact({
     personIds: args.people?.length ? await resolvePeople(ctx, args.people) : undefined,
     albumIds: args.album ? [await resolveAlbum(ctx, args.album)] : undefined,
@@ -161,8 +183,8 @@ export async function runSearch(ctx: ToolContext, args: SearchArgs): Promise<Cal
     city: args.city,
     state: args.state,
     country: args.country,
-    takenAfter: args.taken_after ? startOfDay(args.taken_after) : undefined,
-    takenBefore: args.taken_before ? endOfDay(args.taken_before) : undefined,
+    takenAfter: dates.takenAfter,
+    takenBefore: dates.takenBefore,
     type:
       args.type === 'photo' ? AssetTypeEnum.Image : args.type === 'video' ? AssetTypeEnum.Video : undefined,
     isFavorite: args.favorite,
@@ -192,11 +214,11 @@ export async function runSearch(ctx: ToolContext, args: SearchArgs): Promise<Cal
     result = await searchAssets({ metadataSearchDto: dto }, ctx.opts);
   }
   const assets = result.assets;
+  // No count: Immich only reports how many are on this page, which reads like a total.
   return json({
     page,
-    count: assets.count,
     next_page: assets.nextPage ? Number(assets.nextPage) : undefined,
-    photos: assets.items.map((a) => summarizeAsset(ctx, a)),
+    photos: assets.items.filter(dates.keep).map((a) => summarizeAsset(ctx, a)),
   });
 }
 
@@ -265,6 +287,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
         'Find photos and videos in Immich. Combine a natural-language `query` (smart search) with filters for people, ' +
         'place, dates, type, album, tags, rating and text in the photo. Without `query` it is a plain filter, sorted by date. ' +
         'Dates are local to where the photo was taken; "UTC" means the file had no time zone, "unknown" that it had no date. ' +
+        'A page can hold fewer than `limit` photos when there are more; follow next_page. ' +
         'Returns ids for view_photos and get_photo_details.',
       inputSchema: searchInput,
       annotations: READ_ONLY,

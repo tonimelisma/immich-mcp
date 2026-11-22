@@ -7,7 +7,8 @@ import { signInPageHeaders } from '../src/oauth/login-page.js';
 import { ImmichOAuthProvider, REFRESH_REUSE_GRACE_SECONDS } from '../src/oauth/provider.js';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { compact, formatDuration, mapLimit, takenAt } from '../src/tools/context.js';
+import { compact, formatDuration, mapLimit, summarizeAsset, takenAt } from '../src/tools/context.js';
+import { dateRange } from '../src/tools/read.js';
 
 const config = loadConfig({ PUBLIC_URL: 'https://photos.example.com/mcp', IMMICH_URL: 'http://immich:2283' });
 
@@ -201,6 +202,38 @@ describe('result helpers', () => {
   it('formatDuration writes m:ss and h:mm:ss', () => {
     expect(formatDuration(50551)).toBe('0:51');
     expect(formatDuration(3_723_000)).toBe('1:02:03');
+  });
+
+  it('dateRange matches plain days by the local date where the photo was taken', () => {
+    const { takenAfter, takenBefore, keep } = dateRange('2026-11-08', '2026-11-10');
+    // Wide enough for UTC+14 and UTC-12.
+    expect(takenAfter).toBe('2026-11-07T10:00:00.000Z');
+    expect(takenBefore).toBe('2026-11-11T13:59:59.999Z');
+    // Melbourne, 2026-11-11 09:48 local = 2026-11-10 22:48 UTC: outside although its UTC day is inside.
+    expect(keep({ localDateTime: '2026-11-11T09:48:30.000Z' })).toBe(false);
+    expect(keep({ localDateTime: '2026-11-10T23:59:00.000Z' })).toBe(true);
+    expect(keep({ localDateTime: '2026-11-08T00:01:00.000Z' })).toBe(true);
+    expect(keep({ localDateTime: '2026-11-07T23:59:00.000Z' })).toBe(false);
+    // A date-time is a moment: passed on as it is, nothing dropped afterwards.
+    const exact = dateRange('2026-11-08T12:00:00Z', undefined);
+    expect(exact.takenAfter).toBe('2026-11-08T12:00:00Z');
+    expect(exact.takenBefore).toBeUndefined();
+    expect(exact.keep({ localDateTime: '2020-01-01T00:00:00.000Z' })).toBe(true);
+  });
+
+  it('summarizeAsset gives a video its length', () => {
+    const ctx = { immichPublicUrl: 'https://photos.example.com' } as Parameters<typeof summarizeAsset>[0];
+    const asset = {
+      id: 'a',
+      type: 'VIDEO',
+      duration: 18_400,
+      originalFileName: 'clip.mp4',
+      localDateTime: '2026-11-22T01:34:00.000Z',
+      fileCreatedAt: '2026-11-22T01:34:00.000Z',
+      isFavorite: false,
+      isArchived: false,
+    } as unknown as Parameters<typeof summarizeAsset>[1];
+    expect(summarizeAsset(ctx, asset)).toMatchObject({ type: 'video', duration: '0:18' });
   });
 
   it('mapLimit keeps order and never runs more than the limit at once', async () => {
