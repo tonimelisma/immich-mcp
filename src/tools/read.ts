@@ -29,6 +29,7 @@ import {
 } from '@immich/sdk';
 import { z } from 'zod';
 import { permissionsFor } from '../immich.js';
+import { VERSION } from '../version.js';
 import {
   compact,
   CONCURRENCY,
@@ -508,7 +509,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
     'about_connection',
     {
       title: 'About this connection',
-      description: 'Who is signed in, the Immich version, and what this connection may do.',
+      description: 'Who is signed in, the Immich and immich-mcp versions, and what this connection may do.',
       inputSchema: {},
       annotations: READ_ONLY,
     },
@@ -520,6 +521,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
         email: me.email,
         admin: ctx.grant.isAdmin,
         immich: `${ctx.immichPublicUrl} v${version.major}.${version.minor}.${version.patch}`,
+        server: `immich-mcp ${VERSION}`,
         permissions: permissionsFor(ctx.grant.isAdmin),
         cannot: 'delete or trash anything, change albums, sharing or settings',
       });

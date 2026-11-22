@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { SecretBox } from '../src/crypto.js';
 import { ADMIN_PERMISSIONS, USER_PERMISSIONS } from '../src/immich.js';
-import { createApp } from '../src/server.js';
+import { createApp, VERSION } from '../src/server.js';
 import { Store } from '../src/store.js';
 
 const IMMICH = process.env.E2E_IMMICH_URL ?? 'http://127.0.0.1:2299';
@@ -437,6 +437,7 @@ describe('tools as a regular user', () => {
     const about = parsed(await call('about_connection'));
     expect(about.email).toBe(MEMBER.email);
     expect(about.admin).toBe(false);
+    expect(about.server).toBe(`immich-mcp ${VERSION}`);
   });
 
   it('search_photos filters by date, person, album and file name', async () => {

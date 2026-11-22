@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Immich__about_connection",
+      "mcp__Immich__list_people",
+      "mcp__Immich__list_albums",
+      "mcp__Immich__list_tags",
+      "mcp__Immich__search_photos",
+      "mcp__Immich__search_suggestions",
+      "mcp__Immich__view_photos",
+      "mcp__Immich__get_photo_details",
+      "mcp__Immich__admin_server_overview",
+      "mcp__Immich__admin_list_users",
+      "mcp__Immich__admin_job_queues",
+      "mcp__github__actions_list",
+      "mcp__github__actions_get",
+      "mcp__github__get_job_logs",
+      "mcp__github__actions_run_trigger",
+      "Bash(npm ci)",
+      "Bash(npm run check)",
+      "Bash(npm version:*)"
+    ]
+  }
+}

@@ -1,5 +1,4 @@
 import express, { type Express, type Request, type Response } from 'express';
-import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
@@ -14,9 +13,9 @@ import type { ToolContext } from './tools/context.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
 
-/** From package.json (next to src/ and dist/), so the version is written in one place. */
-export const VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string })
-  .version;
+import { VERSION } from './version.js';
+
+export { VERSION };
 
 const INSTRUCTIONS = `Tools for one person's Immich photo library, acting as that Immich user.
 Find photos with search_photos (natural-language query plus filters), then look at them with view_photos
