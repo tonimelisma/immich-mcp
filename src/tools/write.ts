@@ -9,23 +9,21 @@ import {
   updateAssets,
   updatePerson,
   upsertTags,
-  getAllTags,
   type AssetBulkUpdateDto,
   type PersonUpdateDto,
 } from '@immich/sdk';
 import { z } from 'zod';
 import {
   compact,
-  guarded,
+  defineTool,
+  EDIT,
   json,
   summarizePerson,
   ToolInputError,
   UUID,
   type ToolContext,
 } from './context.js';
-import { resolvePeople, resolvePerson } from './read.js';
-
-const EDIT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+import { resolvePeople, resolvePerson, resolveTags } from './read.js';
 
 const ids = z.array(z.string().regex(UUID, 'photo ids')).min(1).max(500);
 const birthDate = z
@@ -34,7 +32,9 @@ const birthDate = z
   .nullable();
 
 export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'update_photos',
     {
       title: 'Edit photo details',
@@ -56,40 +56,30 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: EDIT,
     },
-    guarded(
-      ctx,
-      async (args: {
-        ids: string[];
-        description?: string;
-        favorite?: boolean;
-        rating?: number | null;
-        taken_at?: string;
-        time_zone?: string;
-        latitude?: number;
-        longitude?: number;
-      }) => {
-        if ((args.latitude === undefined) !== (args.longitude === undefined)) {
-          throw new ToolInputError('Give latitude and longitude together.');
-        }
-        if (args.rating === 0)
-          throw new ToolInputError('Rating 0 is not valid in Immich; use null for unrated.');
-        const dto: AssetBulkUpdateDto = { ids: args.ids };
-        if (args.description !== undefined) dto.description = args.description;
-        if (args.favorite !== undefined) dto.isFavorite = args.favorite;
-        if (args.rating !== undefined) dto.rating = args.rating as number;
-        if (args.taken_at !== undefined) dto.dateTimeOriginal = args.taken_at;
-        if (args.time_zone !== undefined) dto.timeZone = args.time_zone;
-        if (args.latitude !== undefined) dto.latitude = args.latitude;
-        if (args.longitude !== undefined) dto.longitude = args.longitude;
-        if (Object.keys(dto).length === 1)
-          throw new ToolInputError('Nothing to change: give at least one field.');
-        await updateAssets({ assetBulkUpdateDto: dto }, ctx.opts);
-        return json({ updated: args.ids.length });
-      },
-    ),
+    async (args) => {
+      if ((args.latitude === undefined) !== (args.longitude === undefined)) {
+        throw new ToolInputError('Give latitude and longitude together.');
+      }
+      if (args.rating === 0)
+        throw new ToolInputError('Rating 0 is not valid in Immich; use null for unrated.');
+      const dto: AssetBulkUpdateDto = { ids: args.ids };
+      if (args.description !== undefined) dto.description = args.description;
+      if (args.favorite !== undefined) dto.isFavorite = args.favorite;
+      if (args.rating !== undefined) dto.rating = args.rating as number;
+      if (args.taken_at !== undefined) dto.dateTimeOriginal = args.taken_at;
+      if (args.time_zone !== undefined) dto.timeZone = args.time_zone;
+      if (args.latitude !== undefined) dto.latitude = args.latitude;
+      if (args.longitude !== undefined) dto.longitude = args.longitude;
+      if (Object.keys(dto).length === 1)
+        throw new ToolInputError('Nothing to change: give at least one field.');
+      await updateAssets({ assetBulkUpdateDto: dto }, ctx.opts);
+      return json({ updated: args.ids.length });
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'tag_photos',
     {
       title: 'Tag photos',
@@ -97,14 +87,16 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: { ids, tags: z.array(z.string().min(1)).min(1).max(20) },
       annotations: EDIT,
     },
-    guarded(ctx, async (args: { ids: string[]; tags: string[] }) => {
+    async (args) => {
       const tags = await upsertTags({ tagUpsertDto: { tags: args.tags } }, ctx.opts);
       for (const tag of tags) await tagAssets({ id: tag.id, bulkIdsDto: { ids: args.ids } }, ctx.opts);
       return json({ tagged: args.ids.length, tags: tags.map((t) => t.value) });
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'untag_photos',
     {
       title: 'Remove tags from photos',
@@ -112,19 +104,16 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: { ids, tags: z.array(z.string().min(1)).min(1).max(20).describe('Tag names or ids.') },
       annotations: EDIT,
     },
-    guarded(ctx, async (args: { ids: string[]; tags: string[] }) => {
-      const all = await getAllTags(ctx.opts);
-      const chosen = args.tags.map((ref) => {
-        const tag = all.find((t) => t.id === ref || t.value.toLowerCase() === ref.toLowerCase());
-        if (!tag) throw new ToolInputError(`No tag "${ref}". Use list_tags to see them.`);
-        return tag;
-      });
+    async (args) => {
+      const chosen = await resolveTags(ctx, args.tags);
       for (const tag of chosen) await untagAssets({ id: tag.id, bulkIdsDto: { ids: args.ids } }, ctx.opts);
       return json({ untagged: args.ids.length, tags: chosen.map((t) => t.value) });
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'update_person',
     {
       title: 'Edit a person',
@@ -139,29 +128,22 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: EDIT,
     },
-    guarded(
-      ctx,
-      async (args: {
-        person: string;
-        name?: string;
-        birth_date?: string | null;
-        hidden?: boolean;
-        favorite?: boolean;
-      }) => {
-        const id = await resolvePerson(ctx, args.person);
-        const dto: PersonUpdateDto = {};
-        if (args.name !== undefined) dto.name = args.name;
-        if (args.birth_date !== undefined) (dto as { birthDate?: string | null }).birthDate = args.birth_date;
-        if (args.hidden !== undefined) dto.isHidden = args.hidden;
-        if (args.favorite !== undefined) dto.isFavorite = args.favorite;
-        if (Object.keys(dto).length === 0)
-          throw new ToolInputError('Nothing to change: give at least one field.');
-        return json(summarizePerson(await updatePerson({ id, personUpdateDto: dto }, ctx.opts)));
-      },
-    ),
+    async (args) => {
+      const id = await resolvePerson(ctx, args.person);
+      const dto: PersonUpdateDto = {};
+      if (args.name !== undefined) dto.name = args.name;
+      if (args.birth_date !== undefined) (dto as { birthDate?: string | null }).birthDate = args.birth_date;
+      if (args.hidden !== undefined) dto.isHidden = args.hidden;
+      if (args.favorite !== undefined) dto.isFavorite = args.favorite;
+      if (Object.keys(dto).length === 0)
+        throw new ToolInputError('Nothing to change: give at least one field.');
+      return json(summarizePerson(await updatePerson({ id, personUpdateDto: dto }, ctx.opts)));
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'create_person',
     {
       title: 'Create a person',
@@ -169,16 +151,18 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: { name: z.string().min(1).max(200), birth_date: birthDate.optional() },
       annotations: { ...EDIT, idempotentHint: false },
     },
-    guarded(ctx, async (args: { name: string; birth_date?: string | null }) => {
+    async (args) => {
       const person = await createPerson(
         { personCreateDto: compact({ name: args.name, birthDate: args.birth_date ?? undefined }) },
         ctx.opts,
       );
       return json(summarizePerson(person));
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'merge_people',
     {
       title: 'Merge people',
@@ -192,7 +176,7 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: { ...EDIT, destructiveHint: true, idempotentHint: false },
     },
-    guarded(ctx, async (args: { into: string; from: string[] }) => {
+    async (args) => {
       const into = await resolvePerson(ctx, args.into);
       const from = await resolvePeople(ctx, args.from);
       if (from.includes(into)) throw new ToolInputError('`into` cannot also be in `from`.');
@@ -206,10 +190,12 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
           failed: failed.map((r) => `${r.id}: ${r.error ?? 'failed'}`),
         }),
       );
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'reassign_face',
     {
       title: 'Reassign a face',
@@ -221,10 +207,10 @@ export function registerWriteTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: EDIT,
     },
-    guarded(ctx, async (args: { face_id: string; person: string }) => {
+    async (args) => {
       const id = await resolvePerson(ctx, args.person);
       const person = await reassignFacesById({ id, faceDto: { id: args.face_id } }, ctx.opts);
       return json({ face_id: args.face_id, now: summarizePerson(person) });
-    }),
+    },
   );
 }

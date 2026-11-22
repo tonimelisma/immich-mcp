@@ -1,4 +1,5 @@
 import express, { type Express, type Request, type Response } from 'express';
+import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
@@ -13,7 +14,9 @@ import type { ToolContext } from './tools/context.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
 
-export const VERSION = '0.1.2';
+/** From package.json (next to src/ and dist/), so the version is written in one place. */
+export const VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string })
+  .version;
 
 const INSTRUCTIONS = `Tools for one person's Immich photo library, acting as that Immich user.
 Find photos with search_photos (natural-language query plus filters), then look at them with view_photos
@@ -62,14 +65,19 @@ export function createApp({ config, store, box, fetch: fetchImpl, log = console.
       res.status(401).json({ error: 'invalid_token' });
       return;
     }
+    // Each POST carries one call. Its Immich requests stop at the deadline, or as soon as the client hangs up.
+    const left = new AbortController();
+    const signal = AbortSignal.any([AbortSignal.timeout(config.immichTimeoutSeconds * 1000), left.signal]);
     const ctx: ToolContext = {
       grant,
-      opts: apiKeyOpts(config.immichUrl, box.open(grant.apiKeySealed), fetchImpl),
+      opts: apiKeyOpts(config.immichUrl, box.open(grant.apiKeySealed), fetchImpl, signal),
       immichPublicUrl: config.immichPublicUrl,
+      timeoutSeconds: config.immichTimeoutSeconds,
       onRevoked: () => {
         log(`Immich rejected the API key of ${grant.email}; ending that sign-in`);
         store.deleteGrant(grant.id);
       },
+      log,
     };
     // Stateless: a fresh server and transport per request, so nothing is shared between users or calls.
     const server = buildMcpServer(ctx);
@@ -77,7 +85,16 @@ export function createApp({ config, store, box, fetch: fetchImpl, log = console.
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
+    // The transport answers malformed requests itself (400 with a JSON-RPC error); say why in the log.
+    transport.onerror = (error) => {
+      const version = req.get('mcp-protocol-version');
+      log(
+        `MCP request from ${grant.email} rejected: ${error.message}` +
+          (version ? ` (mcp-protocol-version: ${version})` : ''),
+      );
+    };
     res.on('close', () => {
+      left.abort();
       void transport.close();
       void server.close();
     });

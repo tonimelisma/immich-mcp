@@ -47,11 +47,18 @@ export interface RequestOpts {
   baseUrl: string;
   headers: Record<string, string>;
   fetch?: typeof fetch;
+  /** Passed to fetch: ends every Immich request of a tool call at its deadline or when the client leaves. */
+  signal?: AbortSignal;
 }
 
 /** Per-call options; the SDK's global defaults are never used, so concurrent users cannot mix. */
-export function apiKeyOpts(baseUrl: string, apiKey: string, fetchImpl?: typeof fetch): RequestOpts {
-  return { baseUrl: `${baseUrl}/api`, headers: { 'x-api-key': apiKey }, fetch: fetchImpl };
+export function apiKeyOpts(
+  baseUrl: string,
+  apiKey: string,
+  fetchImpl?: typeof fetch,
+  signal?: AbortSignal,
+): RequestOpts {
+  return { baseUrl: `${baseUrl}/api`, headers: { 'x-api-key': apiKey }, fetch: fetchImpl, signal };
 }
 
 function sessionOpts(baseUrl: string, accessToken: string, fetchImpl?: typeof fetch): RequestOpts {
@@ -151,6 +158,11 @@ export async function signInAndCreateKey(options: {
 /** True when Immich says the key is no longer valid (revoked in Account settings, or the user removed). */
 export function isRevoked(error: unknown): boolean {
   return isHttpError(error) && error.status === 401;
+}
+
+/** True when a request was cut off by its deadline (AbortSignal.timeout). */
+export function isTimeout(error: unknown): boolean {
+  return error instanceof Error && error.name === 'TimeoutError';
 }
 
 export function describeError(error: unknown): string {

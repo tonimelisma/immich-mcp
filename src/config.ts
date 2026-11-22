@@ -19,6 +19,11 @@ export interface Config {
   apiKeyName: string;
   /** Unused keys younger than this are not swept (see KEY_GRACE_MS). */
   keyGraceSeconds: number;
+  /**
+   * How long one tool call may wait for Immich. Below the 60 s clients such as Claude wait, so a busy
+   * Immich gives a clear error instead of a client-side timeout with an unknown outcome.
+   */
+  immichTimeoutSeconds: number;
 }
 
 export const DEFAULT_REDIRECT_URIS = [
@@ -76,6 +81,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     apiKeyName: env.API_KEY_NAME || 'Claude (immich-mcp)',
     keyGraceSeconds: env.KEY_GRACE_SECONDS === '0' ? 0 : seconds(env, 'KEY_GRACE_SECONDS', 120),
+    immichTimeoutSeconds: seconds(env, 'IMMICH_TIMEOUT', 45),
   };
 }
 

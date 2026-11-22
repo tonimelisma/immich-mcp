@@ -113,18 +113,24 @@ location ~ ^/\.well-known/(oauth-protected-resource|oauth-authorization-server|o
 
 Then in claude.ai: Settings → Connectors → Add custom connector → `https://photos.example.com/mcp`.
 
-| Variable                                | Default                         | Meaning                                                              |
-| --------------------------------------- | ------------------------------- | -------------------------------------------------------------------- |
-| `PUBLIC_URL`                            | (required)                      | Public URL of the MCP endpoint; also the OAuth issuer                |
-| `IMMICH_URL`                            | (required)                      | How this server reaches Immich                                       |
-| `IMMICH_PUBLIC_URL`                     | origin of `PUBLIC_URL`          | Base for photo links in results                                      |
-| `DATA_DIR`                              | `./data` (`/data` in the image) | SQLite database and generated encryption key                         |
-| `ENCRYPTION_KEY`                        | generated into `DATA_DIR`       | Base64 32-byte key; set it to keep the key out of the data directory |
-| `ALLOWED_REDIRECT_URIS`                 | Claude callbacks, loopback      | Comma-separated; exact URIs or `scheme://host:*`                     |
-| `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL` | `3600`, `7776000`               | Seconds                                                              |
-| `TRUST_PROXY`                           | `loopback`                      | Express `trust proxy`, for rate limits behind a proxy                |
-| `API_KEY_NAME`                          | `Claude (immich-mcp)`           | Name of the key created in Immich                                    |
-| `PORT`, `HOST`                          | `8080`, `0.0.0.0`               | Listen address                                                       |
+| Variable                                | Default                         | Meaning                                                               |
+| --------------------------------------- | ------------------------------- | --------------------------------------------------------------------- |
+| `PUBLIC_URL`                            | (required)                      | Public URL of the MCP endpoint; also the OAuth issuer                 |
+| `IMMICH_URL`                            | (required)                      | How this server reaches Immich                                        |
+| `IMMICH_PUBLIC_URL`                     | origin of `PUBLIC_URL`          | Base for photo links in results                                       |
+| `DATA_DIR`                              | `./data` (`/data` in the image) | SQLite database and generated encryption key                          |
+| `ENCRYPTION_KEY`                        | generated into `DATA_DIR`       | Base64 32-byte key; set it to keep the key out of the data directory  |
+| `ALLOWED_REDIRECT_URIS`                 | Claude callbacks, loopback      | Comma-separated; exact URIs or `scheme://host:*`                      |
+| `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL` | `3600`, `7776000`               | Seconds                                                               |
+| `TRUST_PROXY`                           | `loopback`                      | Express `trust proxy`, for rate limits behind a proxy                 |
+| `API_KEY_NAME`                          | `Claude (immich-mcp)`           | Name of the key created in Immich                                     |
+| `IMMICH_TIMEOUT`                        | `45`                            | Seconds a tool call waits for Immich before it gives up with an error |
+| `PORT`, `HOST`                          | `8080`, `0.0.0.0`               | Listen address                                                        |
+
+The log has one line per tool call with who made it, how long it took and whether it worked, and the reason
+for every request the MCP endpoint rejects (such as an unsupported `mcp-protocol-version`). `IMMICH_TIMEOUT`
+stays under the 60 s Claude waits, so a busy Immich gives a clear error instead of a timeout with an unknown
+outcome.
 
 ## Development
 

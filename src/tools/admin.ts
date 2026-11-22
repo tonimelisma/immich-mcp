@@ -11,23 +11,25 @@ import {
   updateQueue,
 } from '@immich/sdk';
 import { z } from 'zod';
-import { compact, guarded, json, type ToolContext } from './context.js';
-
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+import { compact, defineTool, EDIT, json, READ_ONLY, type ToolContext } from './context.js';
 
 const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 
 /** Registered only for Immich administrators. */
 export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'admin_server_overview',
     {
       title: 'Server overview (admin)',
-      description: 'Immich version and build, disk use, and photo, video and storage totals per user.',
+      description:
+        'Immich version and build, disk use, and photo and video totals per user, with the size of the files uploaded ' +
+        'to Immich (Immich does not count files in external libraries).',
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    guarded(ctx, async () => {
+    async () => {
       const [about, storage, stats] = await Promise.all([
         getAboutInfo(ctx.opts),
         getStorage(ctx.opts),
@@ -41,19 +43,27 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
           free: storage.diskAvailable,
           used_percent: storage.diskUsagePercentage,
         },
-        totals: { photos: stats.photos, videos: stats.videos, storage: gib(stats.usage) },
-        users: stats.usageByUser.map((u) => ({
-          name: u.userName,
-          photos: u.photos,
-          videos: u.videos,
-          storage: gib(u.usage),
-          quota: u.quotaSizeInBytes ? gib(u.quotaSizeInBytes) : undefined,
-        })),
+        totals: { photos: stats.photos, videos: stats.videos, uploaded_files: gib(stats.usage) },
+        users: stats.usageByUser.map((u) =>
+          compact({
+            name: u.userName,
+            photos: u.photos,
+            videos: u.videos,
+            uploaded_files: gib(u.usage),
+            quota: u.quotaSizeInBytes ? gib(u.quotaSizeInBytes) : undefined,
+          }),
+        ),
+        note:
+          stats.usage === 0 && stats.photos + stats.videos > 0
+            ? 'uploaded_files is 0 although there are photos: they are probably in external libraries, which Immich does not count.'
+            : 'uploaded_files counts files uploaded to Immich; files in external libraries are not included.',
       });
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'admin_list_users',
     {
       title: 'Users (admin)',
@@ -61,7 +71,7 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    guarded(ctx, async () =>
+    async () =>
       json(
         (await searchUsersAdmin({}, ctx.opts)).map((u) =>
           compact({
@@ -76,28 +86,43 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
           }),
         ),
       ),
-    ),
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'admin_job_queues',
     {
       title: 'Job queues (admin)',
       description:
-        'Immich background job queues (thumbnails, face recognition, smart search, …): waiting, active, failed, paused.',
+        'Immich background job queues (thumbnails, face recognition, smart search, …): for each busy queue the jobs ' +
+        'waiting, active, delayed and failed, and whether it is paused; queues with nothing to report are listed as idle.',
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    guarded(ctx, async () =>
-      json(
-        (await getQueues(ctx.opts)).map((q) =>
-          compact({ queue: q.name, is_paused: q.isPaused || undefined, ...q.statistics }),
-        ),
-      ),
-    ),
+    async () => {
+      const busy = [];
+      const idle: string[] = [];
+      for (const q of await getQueues(ctx.opts)) {
+        // `completed` is always 0 (Immich does not keep finished jobs) and `paused` repeats is_paused.
+        const { active, waiting, delayed, failed } = q.statistics;
+        const counts = compact({
+          active: active || undefined,
+          waiting: waiting || undefined,
+          delayed: delayed || undefined,
+          failed: failed || undefined,
+        });
+        if (Object.keys(counts).length || q.isPaused)
+          busy.push({ queue: q.name, paused: q.isPaused || undefined, ...counts });
+        else idle.push(q.name);
+      }
+      return json({ busy, idle });
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'admin_queue_control',
     {
       title: 'Start, pause or resume a queue (admin)',
@@ -108,14 +133,9 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
         queue: z.enum(Object.values(QueueName) as [string, ...string[]]),
         action: z.enum(['start', 'pause', 'resume']),
       },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: EDIT,
     },
-    guarded(ctx, async (args: { queue: string; action: 'start' | 'pause' | 'resume' }) => {
+    async (args) => {
       const name = args.queue as QueueName;
       if (args.action === 'start') {
         await runQueueCommandLegacy(
@@ -126,6 +146,6 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
         await updateQueue({ name, queueUpdateDto: { isPaused: args.action === 'pause' } }, ctx.opts);
       }
       return json({ queue: args.queue, done: args.action });
-    }),
+    },
   );
 }

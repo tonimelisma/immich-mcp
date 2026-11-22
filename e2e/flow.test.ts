@@ -464,7 +464,8 @@ describe('tools as a regular user', () => {
     const [forest] = parsed<Json[]>(await call('get_photo_details', { ids: [ids.forest] }));
     expect(forest?.taken).toBe('2022-05-01 09:15');
     expect((forest?.gps as Json).latitude).toBeCloseTo(37.7456, 3);
-    expect((forest?.faces as Json[])[0]?.person).toContain(people.bob);
+    expect((forest?.faces as Json[])[0]).toMatchObject({ person: people.bob, person_id: expect.any(String) });
+    expect(forest?.type).toBe('photo');
   });
 
   it('list_people, list_albums, list_tags and search_suggestions', async () => {
@@ -629,10 +630,14 @@ describe('admin', () => {
   it('admin tools work', async () => {
     const overview = parsed(await client.callTool({ name: 'admin_server_overview', arguments: {} }));
     expect((overview.totals as Json).photos).toBeGreaterThanOrEqual(3);
+    expect((overview.totals as Json).uploaded_files).toMatch(/GiB$/);
     const users = parsed<Json[]>(await client.callTool({ name: 'admin_list_users', arguments: {} }));
     expect(users.map((u) => u.email)).toContain(MEMBER.email);
-    const queues = parsed<Json[]>(await client.callTool({ name: 'admin_job_queues', arguments: {} }));
-    expect(queues.map((q) => q.queue)).toContain('thumbnailGeneration');
+    const queues = parsed<{ busy: Json[]; idle: string[] }>(
+      await client.callTool({ name: 'admin_job_queues', arguments: {} }),
+    );
+    expect([...queues.busy.map((q) => q.queue), ...queues.idle]).toContain('thumbnailGeneration');
+    for (const q of queues.busy) expect(q).not.toHaveProperty('completed');
     for (const action of ['pause', 'resume', 'start']) {
       const res = await client.callTool({
         name: 'admin_queue_control',

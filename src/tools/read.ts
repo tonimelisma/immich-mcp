@@ -21,27 +21,32 @@ import {
   viewAsset,
   AlbumUserRole,
   type AlbumResponseDto,
+  type AssetFaceResponseDto,
   type AssetResponseDto,
   type MetadataSearchDto,
   type SmartSearchDto,
+  type TagResponseDto,
 } from '@immich/sdk';
 import { z } from 'zod';
 import { permissionsFor } from '../immich.js';
 import {
   compact,
-  guarded,
+  CONCURRENCY,
+  defineTool,
+  formatDuration,
   json,
-  localTime,
+  kindOf,
+  mapLimit,
   photoUrl,
   placeOf,
+  READ_ONLY,
   summarizeAsset,
   summarizePerson,
+  takenAt,
   ToolInputError,
   UUID,
   type ToolContext,
 } from './context.js';
-
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
 const date = z
   .string()
@@ -49,25 +54,17 @@ const date = z
 
 /** Accepts person ids or names; a name must match exactly one person. */
 export async function resolvePeople(ctx: ToolContext, refs: string[]): Promise<string[]> {
-  const ids: string[] = [];
-  for (const ref of refs) {
-    if (UUID.test(ref)) {
-      ids.push(ref);
-      continue;
-    }
+  return mapLimit(refs, CONCURRENCY, async (ref) => {
+    if (UUID.test(ref)) return ref;
     const found = await searchPerson({ name: ref, withHidden: true }, ctx.opts);
     const exact = found.filter((p) => p.name.toLowerCase() === ref.toLowerCase());
     const pick = exact.length ? exact : found;
-    if (pick.length === 1 && pick[0]) {
-      ids.push(pick[0].id);
-    } else if (pick.length === 0) {
+    if (pick.length === 1 && pick[0]) return pick[0].id;
+    if (pick.length === 0)
       throw new ToolInputError(`No person named "${ref}". Use list_people to see the names.`);
-    } else {
-      const options = pick.slice(0, 10).map((p) => `${p.name || '(unnamed)'} [${p.id}]`);
-      throw new ToolInputError(`"${ref}" matches several people; pass one id instead: ${options.join(', ')}`);
-    }
-  }
-  return ids;
+    const options = pick.slice(0, 10).map((p) => `${p.name || '(unnamed)'} [${p.id}]`);
+    throw new ToolInputError(`"${ref}" matches several people; pass one id instead: ${options.join(', ')}`);
+  });
 }
 
 export async function resolvePerson(ctx: ToolContext, ref: string): Promise<string> {
@@ -132,22 +129,25 @@ export const searchInput = {
   limit: z.number().int().min(1).max(100).optional().describe('Results per page, default 25.'),
 };
 
-type SearchArgs = {
-  [K in keyof typeof searchInput]?: z.infer<(typeof searchInput)[K]>;
-};
+type SearchArgs = { [K in keyof typeof searchInput]?: z.infer<(typeof searchInput)[K]> };
 
 const endOfDay = (value: string) => (value.length === 10 ? `${value}T23:59:59.999Z` : value);
 const startOfDay = (value: string) => (value.length === 10 ? `${value}T00:00:00.000Z` : value);
 
-async function resolveTags(ctx: ToolContext, refs: string[]): Promise<string[]> {
+/** Accepts tag ids, full names (Parent/Child) or, when it is unambiguous, the last part of the name. */
+export async function resolveTags(ctx: ToolContext, refs: string[]): Promise<TagResponseDto[]> {
   const all = await getAllTags(ctx.opts);
   return refs.map((ref) => {
-    if (UUID.test(ref)) return ref;
-    const tag = all.find(
-      (t) => t.value.toLowerCase() === ref.toLowerCase() || t.name.toLowerCase() === ref.toLowerCase(),
+    const lower = ref.toLowerCase();
+    const byId = all.find((t) => t.id === ref);
+    if (byId) return byId;
+    const full = all.filter((t) => t.value.toLowerCase() === lower);
+    const pick = full.length ? full : all.filter((t) => t.name.toLowerCase() === lower);
+    if (pick.length === 1 && pick[0]) return pick[0];
+    if (pick.length === 0) throw new ToolInputError(`No tag "${ref}". Use list_tags to see them.`);
+    throw new ToolInputError(
+      `"${ref}" matches several tags; use the full name: ${pick.map((t) => t.value).join(', ')}`,
     );
-    if (!tag) throw new ToolInputError(`No tag "${ref}". Use list_tags to see them.`);
-    return tag.id;
   });
 }
 
@@ -157,7 +157,7 @@ export async function runSearch(ctx: ToolContext, args: SearchArgs): Promise<Cal
   const common = compact({
     personIds: args.people?.length ? await resolvePeople(ctx, args.people) : undefined,
     albumIds: args.album ? [await resolveAlbum(ctx, args.album)] : undefined,
-    tagIds: args.tags?.length ? await resolveTags(ctx, args.tags) : undefined,
+    tagIds: args.tags?.length ? (await resolveTags(ctx, args.tags)).map((t) => t.id) : undefined,
     city: args.city,
     state: args.state,
     country: args.country,
@@ -206,14 +206,24 @@ function ownerName(ctx: ToolContext, users: AlbumResponseDto['albumUsers']): str
   return owner && owner.user.id !== ctx.grant.userId ? owner.user.name : undefined;
 }
 
+function faceOf(face: AssetFaceResponseDto) {
+  return compact({
+    face_id: face.id,
+    person: face.person ? face.person.name || '(unnamed)' : '(not recognised)',
+    person_id: face.person?.id,
+    box: { x1: face.boundingBoxX1, y1: face.boundingBoxY1, x2: face.boundingBoxX2, y2: face.boundingBoxY2 },
+    image_size: `${face.imageWidth}x${face.imageHeight}`,
+  });
+}
+
 function details(ctx: ToolContext, asset: AssetResponseDto) {
   const e = asset.exifInfo;
   return compact({
     id: asset.id,
     url: photoUrl(ctx, asset.id),
-    type: asset.type.toLowerCase(),
+    type: kindOf(asset),
     file: asset.originalFileName,
-    taken: localTime(asset),
+    taken: takenAt(asset),
     time_zone: e?.timeZone ?? undefined,
     place: placeOf(asset),
     gps:
@@ -231,34 +241,40 @@ function details(ctx: ToolContext, asset: AssetResponseDto) {
       aperture: e?.fNumber ? `f/${e.fNumber}` : undefined,
       shutter: e?.exposureTime ? `${e.exposureTime} s` : undefined,
       iso: e?.iso ?? undefined,
-      focal_length: e?.focalLength ? `${e.focalLength} mm` : undefined,
+      focal_length: e?.focalLength ? `${Math.round(e.focalLength * 10) / 10} mm` : undefined,
     }),
     size: compact({
       width: e?.exifImageWidth ?? asset.width ?? undefined,
       height: e?.exifImageHeight ?? asset.height ?? undefined,
       bytes: e?.fileSizeInByte ?? undefined,
     }),
-    duration: asset.type === AssetTypeEnum.Video ? asset.duration : undefined,
+    duration:
+      asset.type === AssetTypeEnum.Video && asset.duration ? formatDuration(asset.duration) : undefined,
     stack: asset.stack ? { id: asset.stack.id, photos: asset.stack.assetCount } : undefined,
   });
 }
 
 export function registerReadTools(server: McpServer, ctx: ToolContext): void {
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'search_photos',
     {
       title: 'Search photos',
       description:
         'Find photos and videos in Immich. Combine a natural-language `query` (smart search) with filters for people, ' +
         'place, dates, type, album, tags, rating and text in the photo. Without `query` it is a plain filter, sorted by date. ' +
+        'Dates are local to where the photo was taken; "UTC" means the file had no time zone, "unknown" that it had no date. ' +
         'Returns ids for view_photos and get_photo_details.',
       inputSchema: searchInput,
       annotations: READ_ONLY,
     },
-    guarded(ctx, (args: SearchArgs) => runSearch(ctx, args)),
+    (args) => runSearch(ctx, args),
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'view_photos',
     {
       title: 'View photos',
@@ -271,12 +287,11 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY,
     },
-    guarded(ctx, async ({ ids, size }: { ids: string[]; size?: 'small' | 'large' }) => {
+    async ({ ids, size }) => {
       const chosen = size ?? (ids.length <= 3 ? 'large' : 'small');
       if (chosen === 'large' && ids.length > 4)
         throw new ToolInputError('At most 4 large photos per call; use size "small" or fewer ids.');
-      const content: CallToolResult['content'] = [];
-      for (const id of ids) {
+      const views = await mapLimit(ids, CONCURRENCY, async (id) => {
         const [info, blob] = await Promise.all([
           getAssetInfo({ id }, ctx.opts),
           viewAsset(
@@ -285,21 +300,25 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
           ),
         ]);
         const s = summarizeAsset(ctx, info);
-        content.push({
-          type: 'text',
-          text: [s.id, s.taken, s.place, s.people?.join(', ')].filter(Boolean).join(' · '),
-        });
-        content.push({
-          type: 'image',
-          mimeType: blob.type || 'image/jpeg',
-          data: Buffer.from(await blob.arrayBuffer()).toString('base64'),
-        });
-      }
-      return { content };
-    }),
+        return [
+          {
+            type: 'text' as const,
+            text: [s.id, s.taken, s.place, s.people?.join(', ')].filter(Boolean).join(' · '),
+          },
+          {
+            type: 'image' as const,
+            mimeType: blob.type || 'image/jpeg',
+            data: Buffer.from(await blob.arrayBuffer()).toString('base64'),
+          },
+        ];
+      });
+      return { content: views.flat() };
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'get_photo_details',
     {
       title: 'Photo details',
@@ -312,38 +331,32 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY,
     },
-    guarded(ctx, async ({ ids, include_text }: { ids: string[]; include_text?: boolean }) => {
-      const out = [];
-      for (const id of ids) {
+    async ({ ids, include_text }) => {
+      const out = await mapLimit(ids, CONCURRENCY, async (id) => {
         const [asset, faces, ocr] = await Promise.all([
           getAssetInfo({ id }, ctx.opts),
           getFaces({ id }, ctx.opts),
           include_text ? getAssetOcr({ id }, ctx.opts) : Promise.resolve([]),
         ]);
-        out.push({
+        return compact({
           ...details(ctx, asset),
-          faces: faces.map((f) =>
-            compact({
-              face_id: f.id,
-              person: f.person ? `${f.person.name || '(unnamed)'} [${f.person.id}]` : '(not recognised)',
-              box: { x1: f.boundingBoxX1, y1: f.boundingBoxY1, x2: f.boundingBoxX2, y2: f.boundingBoxY2 },
-              image_size: `${f.imageWidth}x${f.imageHeight}`,
-            }),
-          ),
-          text: include_text ? ocr.map((o) => o.text).join('\n') || undefined : undefined,
+          faces: faces.map(faceOf),
+          text: ocr.map((o) => o.text).join('\n'),
         });
-      }
+      });
       return json(out);
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'list_people',
     {
       title: 'List people',
       description:
-        'People Immich recognises, with ids, names and birth dates. Filter by name; `with_counts` adds the number of photos ' +
-        '(for up to 50 results).',
+        'People Immich recognises, with ids, names and birth dates; named people come first. Filter by name; ' +
+        '`with_counts` adds the number of photos of each (up to 50 people, and slow on a busy server).',
       inputSchema: {
         name: z.string().optional(),
         include_hidden: z.boolean().optional(),
@@ -354,49 +367,41 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY,
     },
-    guarded(
-      ctx,
-      async (args: {
-        name?: string;
-        include_hidden?: boolean;
-        include_unnamed?: boolean;
-        with_counts?: boolean;
-        page?: number;
-        limit?: number;
-      }) => {
-        const limit = args.limit ?? 100;
-        let people;
-        let total: number | undefined;
-        let hasMore = false;
-        if (args.name) {
-          people = await searchPerson({ name: args.name, withHidden: args.include_hidden }, ctx.opts);
-        } else {
-          const res = await getAllPeople(
-            { withHidden: args.include_hidden, page: args.page ?? 1, size: limit },
-            ctx.opts,
-          );
-          people = res.people;
-          total = res.total;
-          hasMore = !!res.hasNextPage;
-        }
-        if (!args.include_unnamed) people = people.filter((p) => p.name);
-        const rows: Record<string, unknown>[] = people.map((p) => summarizePerson(p));
-        if (args.with_counts) {
-          if (rows.length > 50)
-            throw new ToolInputError('with_counts works for up to 50 people; narrow the list.');
-          await Promise.all(
-            people.map(async (p, i) => {
-              const row = rows[i];
-              if (row) row.photos = (await getPersonStatistics({ id: p.id }, ctx.opts)).assets;
-            }),
-          );
-        }
-        return json(compact({ total, has_more: hasMore || undefined, people: rows }));
-      },
-    ),
+    async (args) => {
+      const limit = args.limit ?? 100;
+      let people;
+      let total: number | undefined;
+      let hasMore = false;
+      if (args.name) {
+        people = await searchPerson({ name: args.name, withHidden: args.include_hidden }, ctx.opts);
+      } else {
+        const res = await getAllPeople(
+          { withHidden: args.include_hidden, page: args.page ?? 1, size: limit },
+          ctx.opts,
+        );
+        people = res.people;
+        hasMore = !!res.hasNextPage;
+        // Immich's total counts unnamed people too, so it is only meaningful when they are listed.
+        if (args.include_unnamed) total = res.total;
+        // Immich lists named people first: once a page holds an unnamed one, no named ones follow.
+        else if (people.some((p) => !p.name)) hasMore = false;
+      }
+      if (!args.include_unnamed) people = people.filter((p) => p.name);
+      if (args.with_counts && people.length > 50)
+        throw new ToolInputError(
+          'with_counts works for up to 50 people; set limit or name to narrow the list.',
+        );
+      const rows = await mapLimit(people, CONCURRENCY, async (p) => ({
+        ...summarizePerson(p),
+        photos: args.with_counts ? (await getPersonStatistics({ id: p.id }, ctx.opts)).assets : undefined,
+      }));
+      return json(compact({ total, has_more: hasMore || undefined, people: rows.map((r) => compact(r)) }));
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'list_albums',
     {
       title: 'List albums',
@@ -405,7 +410,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: { name: z.string().optional().describe('Part of the album name.') },
       annotations: READ_ONLY,
     },
-    guarded(ctx, async ({ name }: { name?: string }) => {
+    async ({ name }) => {
       const albums = await getAllAlbums({}, ctx.opts);
       const lower = name?.toLowerCase();
       return json(
@@ -424,10 +429,12 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
             }),
           ),
       );
-    }),
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'list_tags',
     {
       title: 'List tags',
@@ -435,16 +442,19 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    guarded(ctx, async () => json((await getAllTags(ctx.opts)).map((t) => ({ id: t.id, tag: t.value })))),
+    async () => json((await getAllTags(ctx.opts)).map((t) => ({ id: t.id, tag: t.value }))),
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'search_suggestions',
     {
       title: 'Places and cameras',
       description:
         'The values Immich has for a field, to get spellings right for search_photos: countries, states (optionally within ' +
-        'a country), cities (optionally within a country and state), camera makes, camera models.',
+        'a country), cities (optionally within a country and state), camera makes, camera models. Values are matched ' +
+        'exactly, so a make written two ways (Sony and SONY) is two values; search each.',
       inputSchema: {
         field: z.enum(['country', 'state', 'city', 'camera_make', 'camera_model']),
         country: z.string().optional(),
@@ -453,31 +463,25 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       },
       annotations: READ_ONLY,
     },
-    guarded(
-      ctx,
-      async (args: {
-        field: 'country' | 'state' | 'city' | 'camera_make' | 'camera_model';
-        country?: string;
-        state?: string;
-        camera_make?: string;
-      }) => {
-        const type = {
-          country: SearchSuggestionType.Country,
-          state: SearchSuggestionType.State,
-          city: SearchSuggestionType.City,
-          camera_make: SearchSuggestionType.CameraMake,
-          camera_model: SearchSuggestionType.CameraModel,
-        }[args.field];
-        const values = await getSearchSuggestions(
-          { $type: type, country: args.country, state: args.state, make: args.camera_make },
-          ctx.opts,
-        );
-        return json(values.filter(Boolean).sort((a, b) => a.localeCompare(b)));
-      },
-    ),
+    async (args) => {
+      const type = {
+        country: SearchSuggestionType.Country,
+        state: SearchSuggestionType.State,
+        city: SearchSuggestionType.City,
+        camera_make: SearchSuggestionType.CameraMake,
+        camera_model: SearchSuggestionType.CameraModel,
+      }[args.field];
+      const values = await getSearchSuggestions(
+        { $type: type, country: args.country, state: args.state, make: args.camera_make },
+        ctx.opts,
+      );
+      return json(values.filter(Boolean).sort((a, b) => a.localeCompare(b)));
+    },
   );
 
-  server.registerTool(
+  defineTool(
+    server,
+    ctx,
     'about_connection',
     {
       title: 'About this connection',
@@ -485,7 +489,7 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    guarded(ctx, async () => {
+    async () => {
       // getMyUser needs the key, so this also confirms Immich still accepts it; the version endpoint is public.
       const [me, version] = await Promise.all([getMyUser(ctx.opts), getServerVersion(ctx.opts)]);
       return json({
@@ -496,6 +500,6 @@ export function registerReadTools(server: McpServer, ctx: ToolContext): void {
         permissions: permissionsFor(ctx.grant.isAdmin),
         cannot: 'delete or trash anything, change albums, sharing or settings',
       });
-    }),
+    },
   );
 }
