@@ -24,9 +24,11 @@ here never deploys, and nothing here refers to a particular deployment.
    that fails with "error from registry: retry-after" hit a registry rate limit: rerun the failed jobs.
 4. **Release**: fast-forward `main` to the branch, `npm version X.Y.Z --no-git-tag-version`, add a
    `## X.Y.Z (date)` section to `CHANGELOG.md`, commit "vX.Y.Z" and push `main`. Do not push tags yourself:
-   the Image workflow tags `vX.Y.Z`, publishes `ghcr.io/tonimelisma/immich-mcp:X.Y.Z` and deletes the merged
-   `branch/*` and `claude/*` branches; wait for it to go green.
-5. **Report** what was checked, fixed and released, the CI results, and the published image tag. If a
+   the Image workflow tags `vX.Y.Z`, publishes `ghcr.io/tonimelisma/immich-mcp` as `X.Y.Z`, `X.Y` and `latest`
+   with an SBOM and provenance, and creates the GitHub release from the CHANGELOG section; wait for it to go
+   green. "Clean up branches" deletes the merged `branch/*` and `claude/*` branches. Pushes to `main` without a
+   new version publish only `edge` and `sha-<commit>`.
+5. **Report** what was checked, fixed and released, the CI results, and the published image tags. If a
    connector is available, `about_connection` shows the version it runs (`server: immich-mcp X.Y.Z`); a
    deployment updates on its own schedule, so an older version there is not a failure.
 

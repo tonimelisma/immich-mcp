@@ -1,13 +1,27 @@
 name: Image
 
+# Publishes ghcr.io/tonimelisma/immich-mcp.
+#
+# A release is a version in package.json that has no tag yet, reaching main (or a pushed vX.Y.Z tag).
+# It is tagged vX.Y.Z, built once for amd64 and arm64 with an SBOM and provenance, published as X.Y.Z,
+# X.Y and latest, and gets a GitHub release with its CHANGELOG.md section. Deployers follow those: pin
+# X.Y.Z, or watch the releases or the latest tag, in whatever way suits them.
+#
+# Any other push to main publishes only edge and sha-<commit>, for testing; latest never moves without
+# a release.
+
 on:
   push:
     branches: [main]
     tags: ['v*']
 
 permissions:
-  contents: write # to tag releases and delete merged branches
+  contents: write # tag releases and create GitHub releases
   packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   image:
@@ -16,20 +30,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # A new version in package.json on main is a release: tag it vX.Y.Z and publish the X.Y.Z image
-      # in this run, since tags pushed with GITHUB_TOKEN start no workflows. A rerun of the same commit
-      # publishes the version again.
+      # Tags pushed with GITHUB_TOKEN start no workflow, so a release found on main is built here.
       - id: release
-        if: github.ref == 'refs/heads/main'
         run: |
           version=$(node -p "require('./package.json').version")
-          if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            git tag "v$version" "$GITHUB_SHA"
-            git push origin "v$version"
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            tag=${GITHUB_REF#refs/tags/}
+            if [[ $tag != "v$version" ]]; then
+              echo "::error::tag $tag does not match package.json version $version"
+              exit 1
+            fi
+          else
+            tag="v$version"
+            if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              git tag "$tag" "$GITHUB_SHA"
+              git push origin "$tag"
+            fi
+            # A version already released from an earlier commit is not released again.
+            [[ $(git rev-list -n 1 "$tag") == "$GITHUB_SHA" ]] || tag=''
           fi
-          if [ "$(git rev-list -n 1 "v$version")" = "$GITHUB_SHA" ]; then
-            echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -41,24 +61,30 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{version}},value=${{ steps.release.outputs.tag }},enable=${{ steps.release.outputs.tag != '' }}
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.release.outputs.tag }},enable=${{ steps.release.outputs.tag != '' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.tag != '' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      # Work branches (branch/*, claude/*) are done once main contains them.
-      - name: Delete merged session branches
-        if: github.ref == 'refs/heads/main'
+      - name: GitHub release
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          for b in $(git branch -r --merged origin/main --format='%(refname:lstrip=3)'); do
-            case "$b" in branch/* | claude/*) git push origin --delete "$b" ;; esac
-          done
+          awk -v v="${TAG#v}" '$0 ~ "^## " v " " {f = 1; next} /^## / && f {exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          [[ -s $RUNNER_TEMP/notes.md ]] || echo "See CHANGELOG.md." > "$RUNNER_TEMP/notes.md"
+          printf '\nImage: `ghcr.io/%s:%s`\n' "$GITHUB_REPOSITORY" "${TAG#v}" >> "$RUNNER_TEMP/notes.md"
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

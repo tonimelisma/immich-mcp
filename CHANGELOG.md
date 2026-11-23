@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 (2026-11-23)
+
+- Release images: `latest` now moves only with a release (`X.Y.Z`, `X.Y` and `latest`), never with an unreleased
+  push to `main`, which publishes `edge` and `sha-<commit>` instead. Images carry an SBOM and build provenance,
+  and each release gets a GitHub release with its changelog.
+
 ## 0.1.5 (2026-11-22)
 
 - `about_connection` reports the running server version (`server: immich-mcp X.Y.Z`), so an install can be
@@ -13,7 +19,7 @@
 - `search_photos`: no `count` (it was only the page size and read like a total); videos show their length.
 - `admin_job_queues`: queues with only failed jobs are listed under `failed`, not `busy`.
 - Releases: a new version in `package.json` on `main` is tagged `vX.Y.Z` and published as image `X.Y.Z` by
-  the Image workflow, which also deletes merged `branch/*` and `claude/*` branches.
+  the Image workflow.
 
 ## 0.1.3 (2026-11-21)
 

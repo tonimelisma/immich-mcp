@@ -1,0 +1,22 @@
+name: Clean up branches
+
+# Work branches (branch/*, claude/*) are deleted once main contains them. Other branches are left alone.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          for b in $(git branch -r --merged origin/main --format='%(refname:lstrip=3)'); do
+            case "$b" in branch/* | claude/*) git push origin --delete "$b" ;; esac
+          done

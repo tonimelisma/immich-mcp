@@ -86,7 +86,7 @@ Requires Immich v3 (tested with v3.4.2) with password login enabled.
 # next to Immich's docker-compose.yml
 services:
   immich-mcp:
-    image: ghcr.io/tonimelisma/immich-mcp:latest
+    image: ghcr.io/tonimelisma/immich-mcp:0.1.6 # pin a release; see Releases below
     environment:
       PUBLIC_URL: https://photos.example.com/mcp
       IMMICH_URL: http://immich_server:2283
@@ -131,6 +131,15 @@ The log has one line per tool call with who made it, how long it took and whethe
 for every request the MCP endpoint rejects (such as an unsupported `mcp-protocol-version`). `IMMICH_TIMEOUT`
 stays under the 60 s Claude waits, so a busy Immich gives a clear error instead of a timeout with an unknown
 outcome.
+
+## Releases
+
+Each release is a `vX.Y.Z` tag with a [GitHub release](https://github.com/tonimelisma/immich-mcp/releases) and
+the image `ghcr.io/tonimelisma/immich-mcp` tagged `X.Y.Z`, `X.Y` and `latest`, built for amd64 and arm64 with an
+SBOM and build provenance. `latest` only ever points at a release. `edge` and `sha-<commit>` follow `main`
+between releases and are for testing. Pin `X.Y.Z` and upgrade when you choose, or follow the releases or the
+`latest` tag with whatever you use to update containers. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+`/healthz` on the MCP path (for example `https://photos.example.com/mcp/healthz`) reports the running version.
 
 ## Development
 
