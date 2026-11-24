@@ -86,7 +86,7 @@ Requires Immich v3 (tested with v3.4.2) with password login enabled.
 # next to Immich's docker-compose.yml
 services:
   immich-mcp:
-    image: ghcr.io/tonimelisma/immich-mcp:0.1.6 # pin a release; see Releases below
+    image: ghcr.io/tonimelisma/immich-mcp:0.1.7 # pin a release; see Releases below
     environment:
       PUBLIC_URL: https://photos.example.com/mcp
       IMMICH_URL: http://immich_server:2283
@@ -139,6 +139,14 @@ the image `ghcr.io/tonimelisma/immich-mcp` tagged `X.Y.Z`, `X.Y` and `latest`, b
 SBOM and build provenance. `latest` only ever points at a release. `edge` and `sha-<commit>` follow `main`
 between releases and are for testing. Pin `X.Y.Z` and upgrade when you choose, or follow the releases or the
 `latest` tag with whatever you use to update containers. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Releases are built only by `.github/workflows/release.yml` on `main`, and each image carries a build-provenance
+attestation, which you can require before deploying:
+
+```sh
+gh attestation verify oci://ghcr.io/tonimelisma/immich-mcp@<digest> --repo tonimelisma/immich-mcp \
+  --signer-workflow tonimelisma/immich-mcp/.github/workflows/release.yml --source-ref refs/heads/main
+```
+
 `/healthz` on the MCP path (for example `https://photos.example.com/mcp/healthz`) reports the running version.
 
 ## Development

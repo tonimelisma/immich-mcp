@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 (2026-11-24)
+
+- Releases are built only by `release.yml` on `main` (no longer from pushed tags) and each image carries a
+  build-provenance attestation signed by that workflow, checkable with `gh attestation verify`. The image
+  itself is unchanged.
+
 ## 0.1.6 (2026-11-23)
 
 - Release images: `latest` now moves only with a release (`X.Y.Z`, `X.Y` and `latest`), never with an unreleased
