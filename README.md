@@ -134,17 +134,21 @@ outcome.
 
 ## Releases
 
-Each release is a `vX.Y.Z` tag with a [GitHub release](https://github.com/tonimelisma/immich-mcp/releases) and
-the image `ghcr.io/tonimelisma/immich-mcp` tagged `X.Y.Z`, `X.Y` and `latest`, built for amd64 and arm64 with an
-SBOM and build provenance. `latest` only ever points at a release. `edge` and `sha-<commit>` follow `main`
-between releases and are for testing. Pin `X.Y.Z` and upgrade when you choose, or follow the releases or the
-`latest` tag with whatever you use to update containers. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
-Releases are built only by `.github/workflows/release.yml` on `main`, and each image carries a build-provenance
-attestation, which you can require before deploying:
+Every change merged to `main` that passes CI is a release: a `vX.Y.Z` tag with a
+[GitHub release](https://github.com/tonimelisma/immich-mcp/releases) whose notes list the merged changes, and the
+image `ghcr.io/tonimelisma/immich-mcp` tagged `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>`, built for amd64 and
+arm64 with an SBOM and build provenance. Pin `X.Y.Z` and upgrade when you choose, or follow the releases or the
+`latest` tag with whatever you use to update containers. Changes up to 0.1.7 are listed in
+[CHANGELOG.md](CHANGELOG.md). Releases are built only by `.github/workflows/release.yml` on `main`; no tag points
+at an image before it has passed its checks and carries a build-provenance attestation and a keyless cosign
+signature, either of which you can require before deploying:
 
 ```sh
 gh attestation verify oci://ghcr.io/tonimelisma/immich-mcp@<digest> --repo tonimelisma/immich-mcp \
   --signer-workflow tonimelisma/immich-mcp/.github/workflows/release.yml --source-ref refs/heads/main
+cosign verify ghcr.io/tonimelisma/immich-mcp@<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/tonimelisma/immich-mcp/.github/workflows/release.yml@refs/heads/main
 ```
 
 `/healthz` on the MCP path (for example `https://photos.example.com/mcp/healthz`) reports the running version.

@@ -1,0 +1,35 @@
+# Weekly update proposals, one grouped pull request per ecosystem. Security updates open right
+# away regardless. Keep one entry per ecosystem the repository uses; actions are pinned by commit
+# SHA with a `# vX.Y.Z` comment, which Dependabot keeps up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    groups:
+      npm-packages:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    groups:
+      docker-images:
+        patterns: ['*']

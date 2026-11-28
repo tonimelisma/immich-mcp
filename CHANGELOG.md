@@ -1,5 +1,8 @@
 # Changelog
 
+Releases after 0.1.7 are made from every CI-green merge to `main`; their notes are generated from the merged
+pull requests on the [GitHub releases](https://github.com/tonimelisma/immich-mcp/releases).
+
 ## 0.1.7 (2026-11-24)
 
 - Releases are built only by `release.yml` on `main` (no longer from pushed tags) and each image carries a
