@@ -23,11 +23,6 @@ on:
 
 permissions: {}
 
-# One release at a time, so two runs can never claim the same version.
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 jobs:
   release:
     if: >-
@@ -35,6 +30,12 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    # One release at a time, so two runs can never claim the same version. On the job, not the
+    # workflow: every CI run (pull requests too) starts this workflow, and a workflow-level group
+    # let those skipped runs cancel a pending release.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
