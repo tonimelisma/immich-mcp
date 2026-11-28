@@ -13,12 +13,14 @@ import { dateRange } from '../src/tools/read.js';
 const config = loadConfig({ PUBLIC_URL: 'https://photos.example.com/mcp', IMMICH_URL: 'http://immich:2283' });
 
 describe('redirect URI allow-list', () => {
+  // Validates: IM-002
   it('accepts the Claude callbacks and any loopback port', () => {
     expect(redirectUriAllowed('https://claude.ai/api/mcp/auth_callback', DEFAULT_REDIRECT_URIS)).toBe(true);
     expect(redirectUriAllowed('http://localhost:33418/callback', DEFAULT_REDIRECT_URIS)).toBe(true);
     expect(redirectUriAllowed('http://127.0.0.1:5000/cb', DEFAULT_REDIRECT_URIS)).toBe(true);
   });
 
+  // Validates: IM-002
   it('rejects look-alikes', () => {
     for (const uri of [
       'https://claude.ai/api/mcp/auth_callback/../../evil',
@@ -36,6 +38,7 @@ describe('redirect URI allow-list', () => {
 });
 
 describe('crypto', () => {
+  // Validates: IM-008
   it('round-trips sealed secrets and rejects tampering', () => {
     const box = new SecretBox(Buffer.alloc(32, 7));
     const sealed = box.seal('secret-key');
@@ -47,6 +50,7 @@ describe('crypto', () => {
     expect(() => new SecretBox(Buffer.alloc(32, 8)).open(sealed)).toThrow();
   });
 
+  // Validates: IM-003
   it('checks S256 PKCE', () => {
     const verifier = 'v'.repeat(50);
     const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -56,6 +60,7 @@ describe('crypto', () => {
 });
 
 describe('sign-in page headers', () => {
+  // Validates: IM-004
   it('let the form post here and its redirect go to the app', () => {
     const csp = signInPageHeaders('https://claude.ai/api/mcp/auth_callback', 'n0nce')[
       'Content-Security-Policy'
@@ -69,12 +74,14 @@ describe('sign-in page headers', () => {
 });
 
 describe('permissions', () => {
+  // Validates: IM-020
   it('never include a delete permission', () => {
     for (const p of [...USER_PERMISSIONS, ...ADMIN_PERMISSIONS]) {
       expect(p).not.toMatch(/delete|all/i);
     }
   });
 
+  // Validates: IM-021
   it('give admin permissions only to admins', () => {
     expect(permissionsFor(false)).toEqual(USER_PERMISSIONS);
     expect(permissionsFor(true)).toEqual([...USER_PERMISSIONS, ...ADMIN_PERMISSIONS]);
@@ -115,6 +122,7 @@ describe('token lifecycle', () => {
     return { store, provider, client };
   };
 
+  // Validates: IM-002
   it('rejects clients with redirect URIs outside the allow-list', () => {
     const { provider } = setup();
     expect(() =>
@@ -122,6 +130,7 @@ describe('token lifecycle', () => {
     ).toThrow(/not allowed/);
   });
 
+  // Validates: IM-005
   it('issues a single-use code bound to its client', async () => {
     const { provider, client } = setup();
     const redirect = provider.issueCode('g1', 'p1');
@@ -140,6 +149,7 @@ describe('token lifecycle', () => {
     expect(() => provider.issueCode('g1', 'p1')).toThrow(/expired/);
   });
 
+  // Validates: IM-006
   it('rotates refresh tokens and ends the sign-in on late reuse', async () => {
     const { store, provider, client } = setup();
     const code = provider.issueCode('g1', 'p1').searchParams.get('code') as string;
@@ -157,6 +167,7 @@ describe('token lifecycle', () => {
     await expect(provider.verifyAccessToken(second.access_token)).rejects.toThrow();
   });
 
+  // Validates: IM-007
   it('revoking a refresh token ends the sign-in', async () => {
     const { store, provider, client } = setup();
     const code = provider.issueCode('g1', 'p1').searchParams.get('code') as string;
@@ -166,6 +177,7 @@ describe('token lifecycle', () => {
     await expect(provider.verifyAccessToken(tokens.access_token)).rejects.toThrow();
   });
 
+  // Validates: IM-008
   it('stores only token hashes', async () => {
     const { store, provider, client } = setup();
     const code = provider.issueCode('g1', 'p1').searchParams.get('code') as string;
@@ -180,6 +192,7 @@ describe('token lifecycle', () => {
 });
 
 describe('result helpers', () => {
+  // Validates: IM-060
   it('compact drops empty values, arrays and objects', () => {
     expect(
       compact({ a: 1, b: undefined, c: null, d: '', e: [], f: {}, g: { x: 1 }, h: 0, i: false }),
@@ -191,6 +204,7 @@ describe('result helpers', () => {
     });
   });
 
+  // Validates: IM-061
   it('takenAt says when a time is UTC or unknown', () => {
     const at = (localDateTime: string, fileCreatedAt: string, timeZone?: string) =>
       takenAt({ localDateTime, fileCreatedAt, exifInfo: { timeZone } });
@@ -199,11 +213,13 @@ describe('result helpers', () => {
     expect(at('1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')).toBe('unknown');
   });
 
+  // Validates: IM-061
   it('formatDuration writes m:ss and h:mm:ss', () => {
     expect(formatDuration(50551)).toBe('0:51');
     expect(formatDuration(3_723_000)).toBe('1:02:03');
   });
 
+  // Validates: IM-031
   it('dateRange matches plain days by the local date where the photo was taken', () => {
     const { takenAfter, takenBefore, keep } = dateRange('2026-11-08', '2026-11-10');
     // Wide enough for UTC+14 and UTC-12.
@@ -221,6 +237,7 @@ describe('result helpers', () => {
     expect(exact.keep({ localDateTime: '2020-01-01T00:00:00.000Z' })).toBe(true);
   });
 
+  // Validates: IM-061
   it('summarizeAsset gives a video its length', () => {
     const ctx = { immichPublicUrl: 'https://photos.example.com' } as Parameters<typeof summarizeAsset>[0];
     const asset = {
@@ -236,6 +253,7 @@ describe('result helpers', () => {
     expect(summarizeAsset(ctx, asset)).toMatchObject({ type: 'video', duration: '0:18' });
   });
 
+  // Validates: IM-062
   it('mapLimit keeps order and never runs more than the limit at once', async () => {
     let running = 0;
     let peak = 0;
@@ -249,6 +267,7 @@ describe('result helpers', () => {
     expect(peak).toBe(2);
   });
 
+  // Validates: IM-070
   it('reads IMMICH_TIMEOUT', () => {
     expect(config.immichTimeoutSeconds).toBe(45);
     const other = loadConfig({
@@ -321,6 +340,7 @@ describe('MCP endpoint', () => {
     return { post, close: () => new Promise((r) => server.close(r)) };
   };
 
+  // Validates: IM-070, IM-071
   it('ends a call Immich does not answer with a clear error, and logs it', async () => {
     const log: string[] = [];
     const { post, close } = await setup(log);
@@ -340,6 +360,7 @@ describe('MCP endpoint', () => {
     }
   });
 
+  // Validates: IM-072
   it('logs why it rejects an unsupported protocol version', async () => {
     const log: string[] = [];
     const { post, close } = await setup(log);

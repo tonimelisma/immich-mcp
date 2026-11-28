@@ -268,6 +268,7 @@ async function connect(accessToken: string): Promise<Client> {
 }
 
 describe('OAuth', () => {
+  // Validates: IM-001
   it('publishes discovery documents and challenges unauthenticated calls', async () => {
     const prm = (await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json()) as Json;
     expect(prm.resource).toBe(`${base}/mcp`);
@@ -289,10 +290,12 @@ describe('OAuth', () => {
     expect(res.headers.get('www-authenticate')).toContain('resource_metadata=');
   });
 
+  // Validates: IM-002
   it('refuses redirect URIs outside the allow-list', async () => {
     expect((await register('https://evil.example/cb')).status).toBe(400);
   });
 
+  // Validates: IM-003, IM-005
   it('shows the sign-in page, rejects a wrong password and needs the right PKCE verifier', async () => {
     const id = ((await (await register()).json()) as Json).client_id as string;
     const { page, html, requestId, verifier } = await startAuthorization(id);
@@ -313,6 +316,7 @@ describe('OAuth', () => {
     expect((await tokenRequest({ ...params, code_verifier: verifier })).status).toBe(400);
   });
 
+  // Validates: IM-009
   it('keeps one scoped API key per user and app, replaced on each sign-in', async () => {
     // claude.ai registers a new client on every connect, so a fresh client with the same callback
     // counts as the same app.
@@ -330,6 +334,7 @@ describe('OAuth', () => {
     expect([...(keys[0]?.permissions as string[])].sort()).toEqual([...USER_PERMISSIONS].sort());
   });
 
+  // Validates: IM-010
   it('deletes keys left by expired sign-ins, and nothing else', async () => {
     const make = async (name: string) =>
       (
@@ -353,6 +358,7 @@ describe('OAuth', () => {
     await api(`/api-keys/${other.id as string}`, { token: memberToken, method: 'DELETE' });
   });
 
+  // Validates: IM-011
   it('a second submit of the same form joins the first instead of failing', async () => {
     const id = ((await (await register()).json()) as Json).client_id as string;
     const { requestId } = await startAuthorization(id);
@@ -370,6 +376,7 @@ describe('OAuth', () => {
     await until('one key', async () => ((await claudeKeys(memberToken)).length === 1 ? true : undefined), 20);
   });
 
+  // Validates: IM-004
   it('signs in from a real browser, which enforces the page security policy', async () => {
     const browser = await chromium.launch(
       process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {},
@@ -397,6 +404,7 @@ describe('OAuth', () => {
     }
   });
 
+  // Validates: IM-006
   it('refresh tokens rotate', async () => {
     const tokens = await signIn(MEMBER);
     const res = await tokenRequest({
@@ -426,6 +434,7 @@ describe('tools as a regular user', () => {
   });
   afterAll(async () => client?.close());
 
+  // Validates: IM-021, IM-022
   it('offers no admin or delete tools', async () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('search_photos');
@@ -433,6 +442,7 @@ describe('tools as a regular user', () => {
     expect(names.some((n) => /delete|trash|remove_photo/.test(n))).toBe(false);
   });
 
+  // Validates: IM-040
   it('about_connection names the user', async () => {
     const about = parsed(await call('about_connection'));
     expect(about.email).toBe(MEMBER.email);
@@ -440,6 +450,7 @@ describe('tools as a regular user', () => {
     expect(about.server).toBe(`immich-mcp ${VERSION}`);
   });
 
+  // Validates: IM-030, IM-031
   it('search_photos filters by date, person, album and file name', async () => {
     const byDate = parsed<{ photos: Json[] }>(
       await call('search_photos', { taken_after: '2023-12-01', taken_before: '2023-12-31' }),
@@ -471,6 +482,7 @@ describe('tools as a regular user', () => {
     expect(unknown.isError).toBe(true);
   });
 
+  // Validates: IM-034
   it('view_photos returns images', async () => {
     const result = (await call('view_photos', { ids: [ids.beach, ids.sign] })) as CallToolResult;
     const images = result.content.filter((c) => c.type === 'image');
@@ -481,6 +493,7 @@ describe('tools as a regular user', () => {
     expect(small.content.filter((c) => c.type === 'image')).toHaveLength(1);
   });
 
+  // Validates: IM-035
   it('get_photo_details shows date, GPS and faces', async () => {
     const [forest] = parsed<Json[]>(await call('get_photo_details', { ids: [ids.forest] }));
     expect(forest?.taken).toBe('2022-05-01 09:15');
@@ -489,6 +502,7 @@ describe('tools as a regular user', () => {
     expect(forest?.type).toBe('photo');
   });
 
+  // Validates: IM-036, IM-037, IM-038, IM-039
   it('list_people, list_albums, list_tags and search_suggestions', async () => {
     const list = parsed<{ people: Json[] }>(await call('list_people', { name: RUN, with_counts: true }));
     const alice = list.people.find((p) => p.name === people.alice);
@@ -501,6 +515,7 @@ describe('tools as a regular user', () => {
     );
   });
 
+  // Validates: IM-030, IM-041
   it('update_photos sets description, favorite, rating and location', async () => {
     await call('update_photos', {
       ids: [ids.sign],
@@ -517,6 +532,7 @@ describe('tools as a regular user', () => {
     expect(bad.isError).toBe(true);
   });
 
+  // Validates: IM-030, IM-042, IM-043
   it('tag_photos and untag_photos', async () => {
     await call('tag_photos', { ids: [ids.beach, ids.forest], tags: [`Trips ${RUN}/Outdoors`] });
     const tagged = parsed<{ photos: Json[] }>(
@@ -528,6 +544,7 @@ describe('tools as a regular user', () => {
     expect(left.photos.map((p) => p.id)).toEqual([ids.beach]);
   });
 
+  // Validates: IM-044, IM-045, IM-046, IM-047
   it('update_person, create_person, reassign_face and merge_people', async () => {
     const updated = parsed(await call('update_person', { person: people.alice, birth_date: '2020-04-24' }));
     expect(updated.birth_date).toBe('2020-04-24');
@@ -561,6 +578,7 @@ describe.runIf(process.env.E2E_ML === '1')('smart search and OCR', () => {
   }, 700_000);
   afterAll(async () => client?.close());
 
+  // Validates: IM-032
   it('finds a photo by what it shows', async () => {
     const res = parsed<{ photos: Json[] }>(
       await client.callTool({
@@ -571,6 +589,7 @@ describe.runIf(process.env.E2E_ML === '1')('smart search and OCR', () => {
     expect(res.photos[0]?.id).toBe(ids.sign);
   });
 
+  // Validates: IM-033
   it('finds a photo by the text in it', async () => {
     const res = parsed<{ photos: Json[] }>(
       await client.callTool({ name: 'search_photos', arguments: { text_in_photo: 'HELLO' } }),
@@ -587,6 +606,7 @@ describe.runIf(process.env.E2E_ML === '1')('smart search and OCR', () => {
 });
 
 describe('safety', () => {
+  // Validates: IM-020
   it('the stored API key cannot delete anything', async () => {
     await signIn(MEMBER);
     const row = store.db
@@ -609,6 +629,7 @@ describe('safety', () => {
     expect((await api(`/assets/${ids.beach}`, { apiKey })).status).toBe(200);
   });
 
+  // Validates: IM-023
   it('deleting the key in Immich ends the connection', async () => {
     const tokens = await signIn(MEMBER);
     const client = await connect(tokens.access_token);
@@ -635,6 +656,7 @@ describe('admin', () => {
   });
   afterAll(async () => client?.close());
 
+  // Validates: IM-021
   it('gets admin tools and an admin-scoped key', async () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toEqual(
@@ -648,6 +670,7 @@ describe('admin', () => {
     );
   });
 
+  // Validates: IM-048, IM-049, IM-050, IM-051
   it('admin tools work', async () => {
     const overview = parsed(await client.callTool({ name: 'admin_server_overview', arguments: {} }));
     expect((overview.totals as Json).photos).toBeGreaterThanOrEqual(3);

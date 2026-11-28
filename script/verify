@@ -1,0 +1,10 @@
+#!/bin/sh
+# Everything CI checks that needs no containers, in one command: typecheck, eslint, prettier, unit
+# tests, the build, and the requirement/doc traceability check. Run before every push. The e2e suite
+# needs Docker (`docker compose -f e2e/docker-compose.yml up -d --wait && npm run test:e2e`) and
+# runs in CI's e2e job; the image checks (script/image-smoke) run in CI's image job.
+set -eu
+cd "$(dirname "$0")/.."
+npm run check
+npm run build
+script/process-check

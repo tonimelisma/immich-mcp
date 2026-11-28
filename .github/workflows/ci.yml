@@ -1,30 +1,47 @@
 name: CI
 
+# Every pull request and every push to main. A green run for a push to main starts the release
+# (release.yml, on workflow_run); scheduled and pull-request runs never release.
 on:
-  push:
   pull_request:
+    # `edited`: a description fixed after the push re-runs the checks that read it. Every job runs
+    # on it, so the newest `CI gate` on a commit always reflects all the checks.
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly re-run on main, off the hour, so rot from new Node releases or advisories shows up.
+    # The machine-learning e2e suite has its own weekly run (e2e-ml.yml).
+    - cron: '23 6 * * 2'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # typecheck, eslint, prettier, unit tests, build and process-check.
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run check
-      - run: npm run build
+      - name: script/verify
+        run: script/verify
 
+  # Sign-in and every tool against a throwaway Immich.
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -34,3 +51,50 @@ jobs:
       - run: npm run test:e2e
       - if: failure()
         run: docker compose -f e2e/docker-compose.yml logs immich-server | tail -200
+
+  # The image builds and meets its runtime contract (amd64 only here; the release builds both
+  # platforms and checks the image it publishes again).
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: immich-mcp:candidate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: script/image-smoke
+        run: script/image-smoke immich-mcp:candidate "$(node -p "require('./package.json').version")"
+
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # pr-check diffs the pull request's base and head
+          persist-credentials: false
+      - name: process-check
+        run: script/process-check
+      - name: pr-check
+        if: github.event_name == 'pull_request'
+        run: script/pr-check
+
+  # The one required status check. It needs every other job and passes only when each of them
+  # succeeded or was skipped, so a cancelled or failed job can never be merged around.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [check, e2e, image, process]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' >/dev/null

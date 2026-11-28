@@ -1,0 +1,50 @@
+#!/bin/sh
+# Checks a built image against its runtime contract before anyone can pull it:
+#   script/image-smoke <image> [<expected version>]
+# It starts the image with only the required settings (Immich need not be reachable), then
+# requires /healthz on the MCP path to answer with the version, the OAuth metadata to be served,
+# the process to run as the unprivileged `node` user, and the data to land in /data.
+# Validates: IM-073
+set -eu
+image=$1
+want=${2:-}
+name=immich-mcp-smoke-$$
+cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+docker run -d --name "$name" -p 127.0.0.1::8080 \
+  -e PUBLIC_URL=http://127.0.0.1:8080/mcp -e IMMICH_URL=http://127.0.0.1:9 "$image" >/dev/null
+port=$(docker port "$name" 8080/tcp | head -n1 | sed 's/.*://')
+base=http://127.0.0.1:$port
+
+health=
+for _ in $(seq 1 30); do
+  health=$(curl -fsS "$base/mcp/healthz" 2>/dev/null) && break
+  sleep 1
+done
+if [ -z "$health" ]; then
+  echo "image-smoke: /mcp/healthz never answered"
+  docker logs "$name"
+  exit 1
+fi
+echo "healthz: $health"
+version=$(printf '%s' "$health" | jq -r .version)
+if [ -n "$want" ] && [ "$version" != "$want" ]; then
+  echo "image-smoke: the image reports version $version, expected $want"
+  exit 1
+fi
+printf '%s' "$health" | jq -e '.ok == true' >/dev/null
+
+curl -fsS "$base/.well-known/oauth-protected-resource/mcp" | jq -e '.resource == "http://127.0.0.1:8080/mcp"' >/dev/null
+
+user=$(docker exec "$name" id -un)
+if [ "$user" != node ]; then
+  echo "image-smoke: the server runs as $user, not node"
+  exit 1
+fi
+# The generated encryption key is written to DATA_DIR on first start.
+docker exec "$name" sh -c 'test -n "$(ls -A /data)"' || {
+  echo "image-smoke: nothing was written to /data"
+  exit 1
+}
+echo "image-smoke: ok ($image, version $version, user $user)"

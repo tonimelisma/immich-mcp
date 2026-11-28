@@ -18,7 +18,7 @@
       "mcp__github__actions_run_trigger",
       "Bash(npm ci)",
       "Bash(npm run check)",
-      "Bash(npm version:*)"
+      "Bash(script/verify)"
     ]
   }
 }

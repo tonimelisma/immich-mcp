@@ -1,101 +1,227 @@
 name: Release
 
-# Publishes ghcr.io/tonimelisma/immich-mcp, and only from main.
+# Publishes ghcr.io/tonimelisma/immich-mcp for every commit that lands on main and passes CI. This
+# is the only workflow that creates tags, releases, image tags, attestations or signatures.
 #
-# Every push to main runs this. When package.json carries a version that has no tag yet, that push is
-# the release: main is tagged vX.Y.Z here, the image is built once for amd64 and arm64 with an SBOM and
-# provenance, published as X.Y.Z, X.Y and latest, given a build-provenance attestation signed by this
-# workflow on refs/heads/main, and a GitHub release is created from its CHANGELOG.md section. Nothing
-# else builds release images: no tag push or other branch starts this workflow, and it refuses to run
-# anywhere but main. Deployers can require the attestation:
+# The version is the next patch in the series that package.json's version names (its major.minor):
+# one above the highest vX.Y.Z tag of that series, or X.Y.0 for a new series. The image is built
+# once for amd64 and arm64 with an SBOM and provenance and pushed by digest only; that digest is
+# checked (script/image-smoke), given a build-provenance attestation and a keyless cosign signature,
+# both by this file running on refs/heads/main; only then is main tagged vX.Y.Z and the image
+# tagged X.Y.Z, X.Y, latest and sha-<commit>. Consumers can require the attestation:
 #
 #   gh attestation verify oci://ghcr.io/tonimelisma/immich-mcp@<digest> --repo tonimelisma/immich-mcp \
 #     --signer-workflow tonimelisma/immich-mcp/.github/workflows/release.yml --source-ref refs/heads/main
 #
-# Any other push to main publishes only edge and sha-<commit>, for testing; latest never moves without
-# a release.
+# So nothing here may run from another branch, nothing triggers on tags, and this file keeps its
+# name. Scheduled and pull-request runs of CI never release.
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
-permissions:
-  contents: write # tag releases and create GitHub releases
-  packages: write
-  id-token: write # sign the attestation
-  attestations: write
+permissions: {}
 
+# One release at a time, so two runs can never claim the same version.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
   release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # the tag and the GitHub release
+      packages: write # the image, its attestation and signature
+      id-token: write # sign the attestation and the image (Sigstore, GitHub OIDC)
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      IMAGE: ghcr.io/${{ github.repository }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
-      - name: Only main releases
+      - name: Refuse anything but main
+        env:
+          REF: ${{ github.ref }}
         run: |
-          if [[ $GITHUB_REF != refs/heads/main ]]; then
-            echo "::error::releases come only from main, not $GITHUB_REF"
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Releases are published only from refs/heads/main, not $REF"
             exit 1
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The commit CI tested, not whatever main points at now.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-      # Tags pushed with GITHUB_TOKEN start no workflow, and no workflow builds from tags anyway.
-      - id: release
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Choose the version
+        id: version
         run: |
-          tag="v$(node -p "require('./package.json').version")"
-          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            git tag "$tag" "$GITHUB_SHA"
-            git push origin "$tag"
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          series=$(node -p "require('./package.json').version.split('.').slice(0, 2).join('.')")
+          [[ "v$series.0" =~ $semver ]] || { echo "::error::package.json names no X.Y series: $series"; exit 1; }
+          highest=$(git tag --list 'v*' | grep -E "$semver" | sort -V | tail -n1 || true)
+
+          # A tag already on this commit means an earlier run claimed it: finish that release.
+          existing=$(git tag --points-at "$SHA" | grep -E "$semver" | sort -V | tail -n1 || true)
+          if [ -n "$existing" ]; then
+            echo "$SHA is already tagged $existing; finishing that release."
+            version=$existing
+            create_tag=false
+          else
+            # CI runs for consecutive merges can finish out of order: never release a commit older
+            # than the highest release.
+            if [ -n "$highest" ] && ! git merge-base --is-ancestor "$(git rev-list -n1 "$highest")" "$SHA"; then
+              echo "::error::$SHA does not contain $highest; refusing to release an older commit"
+              exit 1
+            fi
+            in_series=$(git tag --list "v$series.*" | grep -E "$semver" | sort -V | tail -n1 || true)
+            if [ -n "$in_series" ]; then
+              version="v$series.$(( ${in_series##*.} + 1 ))"
+            else
+              version="v$series.0"
+            fi
+            if [ -n "$highest" ] && [ "$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -n1)" != "$version" ]; then
+              echo "::error::$version (series $series from package.json) is not higher than $highest"
+              exit 1
+            fi
+            create_tag=true
           fi
-          # A version already released from an earlier commit is not released again.
-          [[ $(git rev-list -n 1 "$tag") == "$GITHUB_SHA" ]] || tag=''
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+          if [ -z "$highest" ] || [ "$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -n1)" = "$version" ]; then
+            latest=true
+          else
+            latest=false
+          fi
+          echo "Releasing $SHA as $version (previous highest: ${highest:-none}, latest: $latest)."
+          {
+            echo "version=$version"
+            echo "number=${version#v}"
+            echo "series=$series"
+            echo "create_tag=$create_tag"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+      # The image reports the version through package.json (src/version.ts), so stamp it before the
+      # build. Not committed: main's package.json keeps naming only the series.
+      - name: Stamp the version
+        env:
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: npm version "$NUMBER" --no-git-tag-version --allow-same-version
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.release.outputs.tag }},enable=${{ steps.release.outputs.tag != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release.outputs.tag }},enable=${{ steps.release.outputs.tag != '' }}
-            type=raw,value=latest,enable=${{ steps.release.outputs.tag != '' }}
-            type=raw,value=edge
-            type=sha
-      - id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      # Pushed untagged, by digest: nobody pulling a tag sees it until it is checked, attested and
+      # signed below.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            org.opencontainers.image.title=immich-mcp
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.number }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+
+      - name: Check the pushed image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          docker pull "$IMAGE@$DIGEST"
+          script/image-smoke "$IMAGE@$DIGEST" "$NUMBER"
+
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-      - name: GitHub release
-        if: steps.release.outputs.tag != ''
+
+      - name: Sign the image
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
           DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      - name: Create the tag
+        if: steps.version.outputs.create_tag == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$VERSION" -f "sha=$SHA"
+
+      - name: Tag the image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          NUMBER: ${{ steps.version.outputs.number }}
+          SERIES: ${{ steps.version.outputs.series }}
+          LATEST: ${{ steps.version.outputs.latest }}
         run: |
-          awk -v v="${TAG#v}" '$0 ~ "^## " v " " {f = 1; next} /^## / && f {exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
-          [[ -s $RUNNER_TEMP/notes.md ]] || echo "See CHANGELOG.md." > "$RUNNER_TEMP/notes.md"
-          printf '\nImage: `ghcr.io/%s:%s` (`%s`)\n' "$GITHUB_REPOSITORY" "${TAG#v}" "$DIGEST" >> "$RUNNER_TEMP/notes.md"
-          gh release view "$TAG" >/dev/null 2>&1 ||
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          set -euo pipefail
+          tags=(-t "$IMAGE:$NUMBER" -t "$IMAGE:sha-${SHA:0:7}")
+          if [ "$LATEST" = true ]; then tags+=(-t "$IMAGE:$SERIES" -t "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
+
+      - name: Publish the GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NUMBER: ${{ steps.version.outputs.number }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            printf 'Image: `%s:%s` (`%s`)\n' "$IMAGE" "$NUMBER" "$DIGEST" > "$RUNNER_TEMP/notes.md"
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes \
+              --notes-file "$RUNNER_TEMP/notes.md" "--latest=$LATEST"
+          fi
+
+      # Validates: IM-080 (on every release: version, tag and image tags)
+      # Validates: IM-081 (on every release: attestation and signature by this file on main)
+      - name: Verify the release like a consumer would
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NUMBER: ${{ steps.version.outputs.number }}
+          SERIES: ${{ steps.version.outputs.series }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          LATEST: ${{ steps.version.outputs.latest }}
+          WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
+        run: |
+          set -euo pipefail
+          tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)
+          [ "$tagged" = "$SHA" ] || { echo "::error::$VERSION points at $tagged, not $SHA"; exit 1; }
+          check=("$NUMBER" "sha-${SHA:0:7}")
+          if [ "$LATEST" = true ]; then check+=("$SERIES" latest); fi
+          for t in "${check[@]}"; do
+            d=$(docker buildx imagetools inspect "$IMAGE:$t" --format '{{json .Manifest}}' | jq -r .digest)
+            [ "$d" = "$DIGEST" ] || { echo "::error::$IMAGE:$t is $d, not the checked $DIGEST"; exit 1; }
+          done
+          gh attestation verify "oci://$IMAGE@$DIGEST" --repo "$GH_REPO" \
+            --signer-workflow "$WORKFLOW" --source-ref refs/heads/main >/dev/null
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/$WORKFLOW@refs/heads/main" >/dev/null
+          echo "Released $IMAGE:$NUMBER ($DIGEST) as $VERSION; attestation and signature verified." >> "$GITHUB_STEP_SUMMARY"
