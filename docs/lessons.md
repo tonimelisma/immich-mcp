@@ -21,4 +21,4 @@ deleted when its problem is solved or its rule moves into a test, an ADR or `CLA
 
 - Claude first connects with `mcp-protocol-version: 2026-07-28`, which `@modelcontextprotocol/sdk` 1.32.2 does
   not support, so each connection starts with a harmless 400 (logged by IM-072). Upgrade the SDK once a release
-  supports it.
+  supports it ([#2](https://github.com/tonimelisma/immich-mcp/issues/2)).
